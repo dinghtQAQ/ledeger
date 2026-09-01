@@ -1,18 +1,19 @@
-/**
- * Welcome to Cloudflare Workers! This is your first worker.
- *
- * - Run `pnpm dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your worker in action
- * - Run `pnpm deploy` to publish your worker
- *
- * Bind resources to your worker in `wrangler.jsonc`. After adding bindings, a type definition for the
- * `Env` object can be regenerated with `pnpm cf-typegen`.
- *
- * Learn more at https://developers.cloudflare.com/workers/
- */
+import { Hono } from "hono";
 
-export default {
-	async fetch(request, env, ctx): Promise<Response> {
-		return new Response("Hello World!");
-	},
-} satisfies ExportedHandler<Env>;
+const app = new Hono<{ Bindings: Env }>();
+
+app.get("/", (c) => c.text("Hello World!"));
+
+app.get("/health", (c) => c.json({ status: "ok" }));
+
+app.get("/health/db", async (c) => {
+	try {
+		const result = await c.env.DB.prepare("SELECT 1 AS ok").first<{ ok: number }>();
+		return c.json({ status: result?.ok === 1 ? "ok" : "degraded" });
+	} catch (error) {
+		console.error("D1 health check failed", error);
+		return c.json({ status: "error" }, 503);
+	}
+});
+
+export default app satisfies ExportedHandler<Env>;
