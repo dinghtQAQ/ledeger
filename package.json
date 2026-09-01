@@ -1,0 +1,24 @@
+{
+	"name": "ledeger",
+	"version": "0.0.0",
+	"private": true,
+	"packageManager": "pnpm@10.33.0",
+	"scripts": {
+		"deploy": "wrangler deploy",
+		"dev": "wrangler dev",
+		"start": "wrangler dev",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"typecheck": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json",
+		"check": "pnpm run typecheck && pnpm run test",
+		"cf-typegen": "wrangler types",
+		"deploy:dry-run": "wrangler deploy --dry-run"
+	},
+	"devDependencies": {
+		"@cloudflare/vitest-plugin": "^1.0.0",
+		"@types/node": "^26.4.0",
+		"typescript": "^5.5.2",
+		"vitest": "~4.1.0",
+		"wrangler": "^4.127.1"
+	}
+}
