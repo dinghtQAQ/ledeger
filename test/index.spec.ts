@@ -41,6 +41,18 @@ async function createEntry(overrides: Record<string, unknown> = {}, key = crypto
 	return { response, body: await response.json<any>() };
 }
 
+async function insertLegacyDueExpense(id = crypto.randomUUID()) {
+	const timestamp = '2026-09-01T01:02:03.000Z';
+	await env.DB.prepare(
+		`INSERT INTO entries (
+			id, type, amount_units, occurred_at, due_at, due_status,
+			category, note, is_reversal, reversal_of, reversed_at, version,
+			idempotency_key, idempotency_payload, created_at, updated_at
+		) VALUES (?, 'due_expense', '100000', ?, ?, 'unpaid', 'legacy', NULL, 0, NULL, NULL, 1, NULL, NULL, ?, ?)`,
+	).bind(id, timestamp, '2026-09-30T00:00:00.000Z', timestamp, timestamp).run();
+	return id;
+}
+
 describe('Hono worker', () => {
 	beforeAll(async () => {
 		await env.DB.prepare('DROP TABLE IF EXISTS entries').run();
@@ -278,6 +290,11 @@ describe('Hono worker', () => {
 		expect(response.response.status).toBe(400);
 	});
 
+	it('does not accept new due expense writes', async () => {
+		const response = await createEntry({ type: 'due_expense', dueAt: '2026-09-30T00:00:00+08:00' }, 'legacy-due-write');
+		expect(response.response.status).toBe(400);
+	});
+
 	it('rejects malformed dates and non-string metadata', async () => {
 		const invalidDate = await createEntry({ occurredAt: '2026-02-30T01:02:03+00:00' }, 'invalid-occurred-at');
 		const invalidCategory = await createEntry({ category: 42 }, 'invalid-category');
@@ -288,10 +305,11 @@ describe('Hono worker', () => {
 	});
 
 	it('creates and pays a due expense without creating a duplicate entry', async () => {
-		const created = await createEntry({ type: 'due_expense', dueAt: '2026-09-30T00:00:00+08:00' });
-		expect(created.response.status).toBe(201);
-		expect(created.body.entry.dueStatus).toBe('unpaid');
-		const paid = await request(`/entries/${created.body.entry.id}/pay`, { method: 'POST', headers: { Authorization: 'Bearer test-key' } });
+		const id = await insertLegacyDueExpense();
+		const created = await request(`/entries/${id}`, { headers: { Authorization: 'Bearer test-key' } });
+		expect(created.status).toBe(200);
+		expect((await created.json<any>()).entry.dueStatus).toBe('unpaid');
+		const paid = await request(`/entries/${id}/pay`, { method: 'POST', headers: { Authorization: 'Bearer test-key' } });
 		expect(paid.status).toBe(200);
 		expect((await paid.json<any>()).entry.dueStatus).toBe('paid');
 		const listed = await request('/entries', { headers: { Authorization: 'Bearer test-key' } });
@@ -299,12 +317,12 @@ describe('Hono worker', () => {
 	});
 
 	it('cancels a due expense when reversing and does not allow payment afterward', async () => {
-		const created = await createEntry({ type: 'due_expense', dueAt: '2026-09-30T00:00:00+08:00' }, 'reverse-due');
-		const reversed = await request(`/entries/${created.body.entry.id}`, {
+		const id = await insertLegacyDueExpense();
+		const reversed = await request(`/entries/${id}`, {
 			method: 'DELETE',
 			headers: { Authorization: 'Bearer test-key' },
 		});
-		const paid = await request(`/entries/${created.body.entry.id}/pay`, { method: 'POST', headers: { Authorization: 'Bearer test-key' } });
+		const paid = await request(`/entries/${id}/pay`, { method: 'POST', headers: { Authorization: 'Bearer test-key' } });
 		expect(reversed.status).toBe(200);
 		expect((await reversed.json<any>()).entry.dueStatus).toBe('cancelled');
 		expect(paid.status).toBe(409);

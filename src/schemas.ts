@@ -20,7 +20,7 @@ const amountSchema = z
 
 export const createEntrySchema = z
 	.object({
-		type: z.enum(['income', 'expense', 'due_expense']).openapi({ example: 'expense' }),
+		type: z.enum(['income', 'expense']).openapi({ example: 'expense' }),
 		amount: amountSchema,
 		occurredAt: isoDateTimeSchema,
 		dueAt: isoDateTimeSchema.optional(),
@@ -30,12 +30,7 @@ export const createEntrySchema = z
 		note: z.string().nullable().optional(),
 	})
 	.superRefine((value, context) => {
-		if (value.type === 'due_expense' && !value.dueAt) {
-			context.addIssue({ code: 'custom', path: ['dueAt'], message: 'dueAt is required for due_expense' });
-		}
-		if (value.type !== 'due_expense' && value.dueAt) {
-			context.addIssue({ code: 'custom', path: ['dueAt'], message: 'dueAt is only valid for due_expense' });
-		}
+		if (value.dueAt) context.addIssue({ code: 'custom', path: ['dueAt'], message: 'dueAt is only valid for legacy due_expense entries' });
 	})
 	.openapi('CreateEntry');
 

@@ -1,4 +1,4 @@
-import { StrictMode, useEffect, useMemo, useState } from 'react';
+import { StrictMode, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
 
@@ -7,6 +7,21 @@ type CoarseCategory = { id: number; name: string };
 type FineCategory = { id: number; name: string; coarseCategoryId: number; sortOrder: number; isActive: boolean };
 type CategoriesResponse = { coarseCategories: CoarseCategory[]; fineCategories: FineCategory[] };
 type LedgerSettings = { paydayDay: number; timezone: string };
+type EntryType = 'income' | 'expense' | 'due_expense';
+type Entry = {
+	id: string;
+	type: EntryType;
+	amount: string;
+	displayAmount: string;
+	occurredAt: string;
+	category: string | null;
+	categoryId?: number | null;
+	subcategoryId?: number | null;
+	note: string | null;
+	isReversal: boolean;
+	reversalOf: string | null;
+};
+type EntryPage = { items: Entry[]; nextCursor: string | null };
 
 declare global {
 	interface Window {
@@ -35,6 +50,38 @@ function navigate(path: string) {
 	if (window.location.pathname === path) return;
 	window.history.pushState({}, '', path);
 	window.dispatchEvent(new PopStateEvent('popstate'));
+}
+
+function currentDateTimeLocal() {
+	const date = new Date();
+	const pad = (value: number) => String(value).padStart(2, '0');
+	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function dateTimeLocalToIso(value: string) {
+	return new Date(value).toISOString();
+}
+
+function createIdempotencyKey() {
+	return crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function isPositiveAccountingAmount(value: string) {
+	if (!/^\d+(?:\.\d+)?$/.test(value)) return false;
+	const [integer, fraction = ''] = value.split('.');
+	if (BigInt(integer) > 0n) return true;
+	const kept = fraction.padEnd(4, '0').slice(0, 4);
+	let units = BigInt(kept || '0');
+	if (fraction[4] && fraction[4] >= '5') units += 1n;
+	return units > 0n;
+}
+
+function displayEntryCategory(entry: Entry, categories: CategoriesResponse | null) {
+	if (entry.category) return entry.category;
+	const coarse = categories?.coarseCategories.find((item) => item.id === entry.categoryId);
+	const fine = categories?.fineCategories.find((item) => item.id === entry.subcategoryId);
+	if (fine && coarse) return `${coarse.name} / ${fine.name}`;
+	return coarse?.name || (entry.type === 'income' ? '未分类收入' : '未分类');
 }
 
 function Turnstile({ onToken }: { onToken: (token: string) => void }) {
@@ -113,24 +160,141 @@ function LoginPage({ onLogin }: { onLogin: (session: Session) => void }) {
 
 function AppShell({ session, onLogout }: { session: Session; onLogout: () => void }) {
 	const path = window.location.pathname;
-	const title = path === '/analytics' ? '分析' : path === '/entries' ? '账目' : path === '/settings' ? '设置' : '分析';
+	const title = path === '/analytics' ? '分析' : path === '/entries' ? '账目' : path === '/entries/new' ? '新增记账' : path === '/settings' ? '设置' : '分析';
 	return (
 		<div className="app-shell">
 			<header className="topbar">
 				<a className="brand" href="/analytics" onClick={(event) => { event.preventDefault(); navigate('/analytics'); }}>LeDeGer</a>
 				<nav aria-label="主导航">
 					<a className={path === '/analytics' ? 'active' : ''} href="/analytics" onClick={(event) => { event.preventDefault(); navigate('/analytics'); }}>分析</a>
-					<a className={path === '/entries' ? 'active' : ''} href="/entries" onClick={(event) => { event.preventDefault(); navigate('/entries'); }}>账目</a>
+					<a className={path.startsWith('/entries') ? 'active' : ''} href="/entries" onClick={(event) => { event.preventDefault(); navigate('/entries'); }}>账目</a>
 					<a className={path === '/settings' ? 'active' : ''} href="/settings" onClick={(event) => { event.preventDefault(); navigate('/settings'); }}>设置</a>
 				</nav>
 				<button className="ghost-button" onClick={onLogout}>退出</button>
 			</header>
 			<main className="content">
 				<div className="content-heading"><div><p className="eyebrow">CURRENT WORKSPACE</p><h1>{title}</h1></div><span className="session-dot" title={session.expiresAt ? `会话有效至 ${new Date(session.expiresAt).toLocaleString()}` : '会话有效'} /></div>
-				{title === '分析' ? <AnalyticsPreview /> : path === '/settings' ? <SettingsPage /> : <section className="empty-state"><h2>{title}功能即将展开</h2><p>当前会话已建立，接口可以直接使用。</p></section>}
+				{title === '分析' ? <AnalyticsPreview /> : path === '/settings' ? <SettingsPage /> : path === '/entries/new' ? <NewEntryPage /> : path === '/entries' ? <EntriesPage /> : <section className="empty-state"><h2>{title}功能即将展开</h2><p>当前会话已建立，接口可以直接使用。</p></section>}
 			</main>
 		</div>
 	);
+}
+
+function EntriesPage() {
+	const [page, setPage] = useState<EntryPage | null>(null);
+	const [categories, setCategories] = useState<CategoriesResponse | null>(null);
+	const [error, setError] = useState('');
+	const [loading, setLoading] = useState(true);
+
+	async function loadEntries() {
+		setLoading(true);
+		setError('');
+		try {
+			const [nextPage, nextCategories] = await Promise.all([
+				api<EntryPage>('/entries?limit=50&sort=occurredAt.desc'),
+				api<CategoriesResponse>('/categories'),
+			]);
+			setPage(nextPage);
+			setCategories(nextCategories);
+		} catch (caught) {
+			setError(caught instanceof Error ? caught.message : '账目加载失败');
+		} finally {
+			setLoading(false);
+		}
+	}
+
+	useEffect(() => { void loadEntries(); }, []);
+
+	if (loading) return <section className="empty-state"><p>正在加载账目…</p></section>;
+	if (error) return <section className="empty-state"><p className="error" role="alert">{error}</p><button type="button" onClick={() => void loadEntries()}>重试</button></section>;
+	return <section className="entries-layout">
+		<div className="entries-toolbar"><div><p className="eyebrow">LEDGER ENTRIES</p><p className="muted">最近 {page?.items.length ?? 0} 笔记录</p></div><button type="button" className="primary-button" onClick={() => navigate('/entries/new')}>新增账目</button></div>
+		{page?.items.length ? <div className="entry-list">{page.items.map((entry) => <article className={`entry-row ${entry.isReversal ? 'reversal' : ''}`} key={entry.id}>
+			<div className="entry-main"><strong>{entry.type === 'income' ? '收入' : entry.type === 'expense' ? '支出' : '到期支出'}{entry.isReversal && ' · 冲正'}</strong><span className="muted">{displayEntryCategory(entry, categories)}</span><span className="muted">{new Date(entry.occurredAt).toLocaleString('zh-CN')}</span></div>
+			<div className="entry-side"><strong className={entry.type === 'income' ? 'amount-income' : 'amount-expense'}>{entry.type === 'income' ? '+' : '-'}{entry.displayAmount}</strong>{entry.note && <span className="muted">{entry.note}</span>}</div>
+		</article>)}</div> : <div className="empty-state"><h2>还没有账目</h2><p className="muted">记录第一笔收入或普通支出。</p><button type="button" className="primary-button" onClick={() => navigate('/entries/new')}>新增账目</button></div>}
+	</section>;
+}
+
+function NewEntryPage() {
+	const [type, setType] = useState<'income' | 'expense'>('expense');
+	const [categories, setCategories] = useState<CategoriesResponse | null>(null);
+	const [categoryId, setCategoryId] = useState('');
+	const [subcategoryId, setSubcategoryId] = useState('');
+	const [amount, setAmount] = useState('');
+	const [occurredAt, setOccurredAt] = useState(currentDateTimeLocal);
+	const [note, setNote] = useState('');
+	const [busy, setBusy] = useState(false);
+	const [loading, setLoading] = useState(true);
+	const [error, setError] = useState('');
+	const idempotencyRef = useRef<{ payload: string; key: string } | null>(null);
+
+	useEffect(() => {
+		api<CategoriesResponse>('/categories').then(setCategories).catch((caught) => setError(caught instanceof Error ? caught.message : '分类加载失败')).finally(() => setLoading(false));
+	}, []);
+
+	const availableFineCategories = categories?.fineCategories.filter((fine) => fine.isActive && String(fine.coarseCategoryId) === categoryId) ?? [];
+
+	function changeType(nextType: 'income' | 'expense') {
+		setType(nextType);
+	}
+
+	async function submit(event: React.FormEvent<HTMLFormElement>) {
+		event.preventDefault();
+		setError('');
+		if (type === 'expense' && !categoryId) {
+			setError('普通支出必须选择粗分类');
+			return;
+		}
+		if (!isPositiveAccountingAmount(amount.trim())) {
+			setError('请输入大于 0 的金额');
+			return;
+		}
+		if (!occurredAt) {
+			setError('请选择发生时间');
+			return;
+		}
+		setBusy(true);
+		try {
+			const payload = {
+				type,
+				amount: amount.trim(),
+				occurredAt: dateTimeLocalToIso(occurredAt),
+				categoryId: categoryId ? Number(categoryId) : null,
+				subcategoryId: subcategoryId ? Number(subcategoryId) : null,
+				note: note.trim() || null,
+			};
+			const payloadKey = JSON.stringify(payload);
+			if (!idempotencyRef.current || idempotencyRef.current.payload !== payloadKey) {
+				idempotencyRef.current = { payload: payloadKey, key: createIdempotencyKey() };
+			}
+			await api<{ entry: Entry }>('/entries', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyRef.current.key },
+				body: payloadKey,
+			});
+			idempotencyRef.current = null;
+			navigate('/entries');
+		} catch (caught) {
+			setError(caught instanceof Error ? caught.message : '账目创建失败');
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	if (loading) return <section className="empty-state"><p>正在加载分类…</p></section>;
+	if (!categories) return <section className="empty-state"><p className="error" role="alert">{error || '分类加载失败'}</p></section>;
+	return <section className="new-entry-layout">
+		<div className="form-intro"><p className="eyebrow">NEW LEDGER ENTRY</p><h2>记下一笔新账</h2><p className="muted">收入可以不选分类；普通支出需要选择粗分类，细分类可留空。</p></div>
+		<form className="entry-form" onSubmit={submit}>
+			<fieldset className="entry-type-field"><legend>类型</legend><div className="type-toggle" role="group" aria-label="账目类型"><button type="button" className={type === 'expense' ? 'selected' : ''} onClick={() => changeType('expense')}>普通支出</button><button type="button" className={type === 'income' ? 'selected' : ''} onClick={() => changeType('income')}>收入</button></div></fieldset>
+			<div className="field-grid"><div><label htmlFor="entry-category">粗分类{type === 'expense' && <span aria-hidden="true"> *</span>}</label><select id="entry-category" value={categoryId} onChange={(event) => { setCategoryId(event.target.value); setSubcategoryId(''); }}><option value="">{type === 'income' ? '不选择分类' : '请选择粗分类'}</option>{categories.coarseCategories.map((coarse) => <option key={coarse.id} value={coarse.id}>{coarse.name}</option>)}</select></div><div><label htmlFor="entry-subcategory">细分类（可选）</label><select id="entry-subcategory" value={subcategoryId} disabled={!categoryId || availableFineCategories.length === 0} onChange={(event) => setSubcategoryId(event.target.value)}><option value="">不选择细分类</option>{availableFineCategories.map((fine) => <option key={fine.id} value={fine.id}>{fine.name}</option>)}</select></div></div>
+			<div className="field-grid"><div><label htmlFor="entry-amount">金额</label><input id="entry-amount" inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="0.00" required /></div><div><label htmlFor="entry-occurred-at">发生时间</label><input id="entry-occurred-at" type="datetime-local" value={occurredAt} onChange={(event) => setOccurredAt(event.target.value)} required /></div></div>
+			<div><label htmlFor="entry-note">备注（可选）</label><textarea id="entry-note" value={note} onChange={(event) => setNote(event.target.value)} rows={3} placeholder="写点容易回想的说明" /></div>
+			{error && <p className="error" role="alert">{error}</p>}
+			<div className="form-actions"><button type="button" className="secondary-button" onClick={() => navigate('/entries')}>取消</button><button type="submit" className="primary-button" disabled={busy}>{busy ? '保存中…' : '保存账目'}</button></div>
+		</form>
+	</section>;
 }
 
 function SettingsPage() {

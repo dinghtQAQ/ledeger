@@ -66,7 +66,7 @@ type CursorContext = {
 };
 type CursorPayload = { key: string; id: string; context: CursorContext };
 type CreateEntryInput = {
-	type: EntryType;
+	type: 'income' | 'expense';
 	amount: string;
 	occurredAt: string;
 	dueAt?: string;
@@ -749,7 +749,7 @@ registerOpenApi(createEntryRoute, async (c: LedgerContext) => {
 		return jsonError(c, 400, 'invalid amount');
 	}
 	const occurredAt = new Date(input.occurredAt).toISOString();
-	const dueAt = input.type === 'due_expense' ? new Date(input.dueAt!).toISOString() : null;
+	const dueAt = null;
 	const categoryId = input.categoryId ?? null;
 	const subcategoryId = input.subcategoryId ?? null;
 	if (input.type === 'expense' && categoryId === null && !input.category) return jsonError(c, 400, 'expense category is required');
@@ -788,7 +788,7 @@ registerOpenApi(createEntryRoute, async (c: LedgerContext) => {
 				amountToUnits(amount).toString(),
 				occurredAt,
 				dueAt,
-				input.type === 'due_expense' ? 'unpaid' : null,
+				null,
 				category,
 				categoryId,
 				subcategoryId,
