@@ -1,5 +1,5 @@
 import { env, createExecutionContext, waitOnExecutionContext, SELF } from 'cloudflare:test';
-import { beforeAll, beforeEach, describe, it, expect } from 'vitest';
+import { beforeAll, beforeEach, describe, it, expect, vi } from 'vitest';
 import worker from '../src/index';
 
 // For now, you'll need to do something like this to get a correctly-typed
@@ -9,6 +9,8 @@ const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
 const TEST_ENV = {
 	...env,
 	LEDGER_API_KEY: 'test-key',
+	LEDGER_PASSWORD: 'test-password',
+	TURNSTILE_SECRET_KEY: 'test-turnstile-secret',
 	LEDGER_TIMEZONE: 'Asia/Shanghai',
 };
 
@@ -67,10 +69,101 @@ describe('Hono worker', () => {
 				)
 			)`,
 		).run();
+		await env.DB.prepare(
+			`CREATE TABLE IF NOT EXISTS auth_sessions (
+				token_hash TEXT PRIMARY KEY,
+				created_at TEXT NOT NULL,
+				expires_at TEXT NOT NULL,
+				last_seen_at TEXT NOT NULL
+			)`,
+		).run();
 	});
 
-	beforeEach(async () => {
+	 beforeEach(async () => {
 		await env.DB.prepare('DELETE FROM entries').run();
+		await env.DB.prepare('DELETE FROM auth_sessions').run();
+	});
+
+	it('logs in with password and Turnstile, reports the session, and slides expiry', async () => {
+		const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ success: true }), { status: 200 }));
+		const login = await request('/auth/login', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', Origin: 'https://example.com' },
+			body: JSON.stringify({ password: 'test-password', turnstileToken: 'token' }),
+		});
+		expect(login.status).toBe(200);
+		expect(login.headers.get('set-cookie')).toContain('HttpOnly');
+		expect(login.headers.get('set-cookie')).toContain('SameSite=Lax');
+		const cookie = login.headers.get('set-cookie')!.split(';')[0];
+		const first = await request('/auth/session', { headers: { Cookie: cookie } });
+		const firstBody = await first.json<any>();
+		expect(firstBody.authenticated).toBe(true);
+		const originalExpiry = firstBody.expiresAt;
+		await new Promise((resolve) => setTimeout(resolve, 2));
+		const second = await request('/auth/session', { headers: { Cookie: cookie } });
+		expect((await second.json<any>()).expiresAt).not.toBe(originalExpiry);
+		expect(second.headers.get('set-cookie')).toContain('Max-Age=604800');
+		fetchMock.mockRestore();
+	});
+
+	it('returns a generic login failure and rate limits repeated attempts', async () => {
+		const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ success: true }), { status: 200 }));
+		for (let index = 0; index < 5; index += 1) {
+			const response = await request('/auth/login', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ password: 'wrong', turnstileToken: 'token' }),
+			});
+			expect(response.status).toBe(401);
+			expect(await response.json()).toEqual({ error: { message: 'authentication failed' } });
+		}
+		const limited = await request('/auth/login', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ password: 'test-password', turnstileToken: 'token' }),
+		});
+		expect(limited.status).toBe(429);
+		fetchMock.mockRestore();
+	});
+
+	it('expires and logs out a browser session, and blocks cross-origin writes', async () => {
+		vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ success: true }), { status: 200 }));
+		const login = await request('/auth/login', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '10.0.0.3' },
+			body: JSON.stringify({ password: 'test-password', turnstileToken: 'token' }),
+		});
+		const cookie = login.headers.get('set-cookie')!.split(';')[0];
+		const tokenHash = await (async () => {
+			const raw = cookie.split('=')[1];
+			const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw));
+			let binary = '';
+			for (const byte of new Uint8Array(digest)) binary += String.fromCharCode(byte);
+			return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+		})();
+		const expired = new Date(Date.now() - 1000).toISOString();
+		await env.DB.prepare('UPDATE auth_sessions SET expires_at = ? WHERE token_hash = ?').bind(expired, tokenHash).run();
+		expect((await (await request('/auth/session', { headers: { Cookie: cookie } })).json<any>()).authenticated).toBe(false);
+		const logout = await request('/auth/logout', { method: 'POST', headers: { Cookie: cookie, Origin: 'https://example.com' } });
+		expect(logout.status).toBe(204);
+		const secondLogin = await request('/auth/login', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '10.0.0.4' },
+			body: JSON.stringify({ password: 'test-password', turnstileToken: 'token' }),
+		});
+		const secondCookie = secondLogin.headers.get('set-cookie')!.split(';')[0];
+		const crossOrigin = await request('/entries', {
+			method: 'POST',
+			headers: {
+				Cookie: secondCookie,
+				Origin: 'https://attacker.example',
+				'Content-Type': 'application/json',
+				'Idempotency-Key': 'cross-origin',
+			},
+			body: JSON.stringify({ type: 'expense', amount: '1', occurredAt: '2026-09-01T00:00:00Z', category: 'food' }),
+		});
+		expect(crossOrigin.status).toBe(403);
+		vi.restoreAllMocks();
 	});
 	it('responds with Hello World! from the root route', async () => {
 		const request = new IncomingRequest('http://example.com');

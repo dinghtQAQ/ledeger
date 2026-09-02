@@ -1,2 +1,4 @@
 LEDGER_API_KEY=replace-with-a-local-secret
+LEDGER_PASSWORD=replace-with-a-local-password
+TURNSTILE_SECRET_KEY=replace-with-turnstile-secret
 LEDGER_TIMEZONE=Asia/Shanghai

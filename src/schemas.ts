@@ -73,3 +73,17 @@ export const listQuerySchema = z.object({
 });
 
 export const healthSchema = z.object({ status: z.string() }).openapi('Health');
+
+export const authLoginSchema = z
+	.object({
+		password: z.string().min(1),
+		turnstileToken: z.string().min(1),
+	})
+	.openapi('AuthLogin');
+
+export const authSessionSchema = z
+	.object({
+		authenticated: z.boolean(),
+		expiresAt: z.string().datetime({ offset: true }).optional(),
+	})
+	.openapi('AuthSession');

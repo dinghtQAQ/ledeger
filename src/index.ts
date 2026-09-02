@@ -8,13 +8,22 @@ import {
 	entryResponseSchema,
 	errorSchema,
 	healthSchema,
+	authLoginSchema,
+	authSessionSchema,
 	idParamSchema,
 	listQuerySchema,
 	reversalResponseSchema,
 } from './schemas';
 import { localDateToUtc } from './time';
 
-type LedgerEnv = Env & { LEDGER_API_KEY?: string; LEDGER_TIMEZONE?: string };
+type LedgerEnv = Env & {
+	LEDGER_API_KEY?: string;
+	LEDGER_PASSWORD?: string;
+	TURNSTILE_SECRET_KEY?: string;
+	TURNSTILE_SECRET?: string;
+	LEDGER_TIMEZONE?: string;
+	ASSETS?: { fetch: typeof fetch };
+};
 type LedgerContext = Context<{ Bindings: LedgerEnv }>;
 type EntryType = 'income' | 'expense' | 'due_expense';
 type DueStatus = 'unpaid' | 'paid' | 'cancelled';
@@ -35,7 +44,7 @@ type EntryRow = {
 	updated_at: string;
 };
 type StoredEntryRow = EntryRow & { idempotency_payload: string | null };
-type ErrorStatus = 400 | 403 | 404 | 409 | 503;
+type ErrorStatus = 400 | 401 | 403 | 404 | 409 | 429 | 503;
 type Sort = keyof typeof sortMap;
 type CursorContext = {
 	sort: string;
@@ -69,6 +78,12 @@ const sortMap = {
 	'amount.asc': 'CAST(amount_units AS INTEGER) ASC, id ASC',
 } as const;
 
+const SESSION_COOKIE = 'ledger_session';
+const SESSION_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
+const LOGIN_WINDOW_MS = 60_000;
+const LOGIN_FAILURE_LIMIT = 5;
+const loginFailures = new Map<string, { count: number; resetAt: number }>();
+
 const app = new OpenAPIHono<{ Bindings: LedgerEnv }>({
 	defaultHook: (result, c) => {
 		if (!result.success) return jsonError(c, 400, 'invalid request');
@@ -76,6 +91,135 @@ const app = new OpenAPIHono<{ Bindings: LedgerEnv }>({
 });
 
 const now = () => new Date().toISOString();
+
+type AuthState = { authenticated: boolean; source: 'bearer' | 'session' | 'none'; expiresAt?: string };
+type SessionRow = { token_hash: string; created_at: string; expires_at: string; last_seen_at: string };
+
+async function ensureAuthTables(db: D1Database) {
+	await db
+		.prepare(
+			`CREATE TABLE IF NOT EXISTS auth_sessions (
+				token_hash TEXT PRIMARY KEY,
+				created_at TEXT NOT NULL,
+				expires_at TEXT NOT NULL,
+				last_seen_at TEXT NOT NULL
+			)`,
+		)
+		.run();
+}
+
+function base64Url(bytes: ArrayBuffer | Uint8Array) {
+	const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+	let binary = '';
+	for (const byte of view) binary += String.fromCharCode(byte);
+	return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function hashToken(token: string) {
+	return base64Url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)));
+}
+
+function readCookie(request: Request, name: string) {
+	const header = request.headers.get('Cookie');
+	if (!header) return null;
+	for (const part of header.split(';')) {
+		const [key, ...value] = part.trim().split('=');
+		if (key === name) return value.join('=') || null;
+	}
+	return null;
+}
+
+function sessionCookie(token: string, maxAge = SESSION_LIFETIME_MS / 1000) {
+	return `${SESSION_COOKIE}=${token}; Max-Age=${Math.max(0, Math.floor(maxAge))}; Path=/; HttpOnly; Secure; SameSite=Lax`;
+}
+
+function withCookie(response: Response, cookie: string) {
+	const headers = new Headers(response.headers);
+	headers.append('Set-Cookie', cookie);
+	return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+function renewSessionCookie(c: LedgerContext, response: Response, auth: AuthState) {
+	if (auth.source !== 'session') return response;
+	const token = readCookie(c.req.raw, SESSION_COOKIE);
+	return token ? withCookie(response, sessionCookie(token)) : response;
+}
+
+function sameOrigin(c: LedgerContext) {
+	const expected = new URL(c.req.url).origin;
+	const origin = c.req.header('Origin');
+	if (origin) return origin === expected;
+	const referer = c.req.header('Referer');
+	if (!referer) return false;
+	try {
+		return new URL(referer).origin === expected;
+	} catch {
+		return false;
+	}
+}
+
+function clientKey(c: LedgerContext) {
+	return c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() || 'unknown';
+}
+
+function isRateLimited(key: string) {
+	const current = Date.now();
+	const record = loginFailures.get(key);
+	if (!record || record.resetAt <= current) {
+		loginFailures.set(key, { count: 0, resetAt: current + LOGIN_WINDOW_MS });
+		return false;
+	}
+	return record.count >= LOGIN_FAILURE_LIMIT;
+}
+
+function recordLoginFailure(key: string) {
+	const current = Date.now();
+	const record = loginFailures.get(key);
+	if (!record || record.resetAt <= current) {
+		loginFailures.set(key, { count: 1, resetAt: current + LOGIN_WINDOW_MS });
+		return;
+	}
+	record.count += 1;
+}
+
+async function verifyTurnstile(c: LedgerContext, token: string) {
+	const secret = c.env.TURNSTILE_SECRET_KEY || c.env.TURNSTILE_SECRET;
+	if (!secret || !token) return false;
+	try {
+		const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ secret, response: token, remoteip: clientKey(c) }).toString(),
+		});
+		if (!response.ok) return false;
+		const body = (await response.json()) as { success?: boolean };
+		return body.success === true;
+	} catch {
+		return false;
+	}
+}
+
+async function authenticate(c: LedgerContext): Promise<AuthState> {
+	if (c.env.LEDGER_API_KEY && c.req.header('Authorization') === `Bearer ${c.env.LEDGER_API_KEY}`) {
+		return { authenticated: true, source: 'bearer' };
+	}
+	const token = readCookie(c.req.raw, SESSION_COOKIE);
+	if (!token) return { authenticated: false, source: 'none' };
+	await ensureAuthTables(c.env.DB);
+	const tokenHash = await hashToken(token);
+	const row = await c.env.DB.prepare('SELECT * FROM auth_sessions WHERE token_hash = ?').bind(tokenHash).first<SessionRow>();
+	if (!row) return { authenticated: false, source: 'none' };
+	const current = Date.now();
+	if (Date.parse(row.expires_at) <= current) {
+		await c.env.DB.prepare('DELETE FROM auth_sessions WHERE token_hash = ?').bind(tokenHash).run();
+		return { authenticated: false, source: 'none' };
+	}
+	const expiresAt = new Date(current + SESSION_LIFETIME_MS).toISOString();
+	await c.env.DB.prepare('UPDATE auth_sessions SET expires_at = ?, last_seen_at = ? WHERE token_hash = ?')
+		.bind(expiresAt, new Date(current).toISOString(), tokenHash)
+		.run();
+	return { authenticated: true, source: 'session', expiresAt };
+}
 
 function jsonError(c: LedgerContext, status: ErrorStatus, message: string): Response {
 	return c.json({ error: { message } }, status);
@@ -109,11 +253,6 @@ function toEntry(row: EntryRow) {
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
 	};
-}
-
-function requireAuth(c: Context<{ Bindings: LedgerEnv }>) {
-	const configured = c.env.LEDGER_API_KEY;
-	return Boolean(configured && c.req.header('Authorization') === `Bearer ${configured}`);
 }
 
 function encodeCursor(value: CursorPayload) {
@@ -186,6 +325,35 @@ const healthDbRoute = createRoute({
 	responses: {
 		200: { description: 'Database health status', content: { 'application/json': { schema: healthSchema } } },
 		503: errorResponse,
+	},
+});
+
+const authLoginRoute = createRoute({
+	method: 'post',
+	path: '/auth/login',
+	request: { body: { required: true, content: { 'application/json': { schema: authLoginSchema } } } },
+	responses: {
+		200: { description: 'Authenticated', content: { 'application/json': { schema: authSessionSchema } } },
+		400: errorResponse,
+		401: errorResponse,
+		429: errorResponse,
+	},
+});
+
+const authSessionRoute = createRoute({
+	method: 'get',
+	path: '/auth/session',
+	responses: {
+		200: { description: 'Session state', content: { 'application/json': { schema: authSessionSchema } } },
+	},
+});
+
+const authLogoutRoute = createRoute({
+	method: 'post',
+	path: '/auth/logout',
+	responses: {
+		204: { description: 'Logged out' },
+		403: errorResponse,
 	},
 });
 
@@ -275,7 +443,61 @@ registerOpenApi(healthDbRoute, async (c: LedgerContext) => {
 	}
 });
 
-app.get('/', (c) => c.text('Hello World!'));
+registerOpenApi(authLoginRoute, async (c: LedgerContext) => {
+	if (c.req.header('Origin') || c.req.header('Referer')) {
+		if (!sameOrigin(c)) return jsonError(c, 403, 'forbidden');
+	}
+	const key = clientKey(c);
+	if (isRateLimited(key)) {
+		const response = jsonError(c, 429, 'authentication failed');
+		response.headers.set('Retry-After', '60');
+		return response;
+	}
+	const input = validated<{ password: string; turnstileToken: string }>(c, 'json');
+	const configuredPassword = c.env.LEDGER_PASSWORD;
+	const turnstileValid = await verifyTurnstile(c, input.turnstileToken);
+	if (!configuredPassword || input.password !== configuredPassword || !turnstileValid) {
+		recordLoginFailure(key);
+		return jsonError(c, 401, 'authentication failed');
+	}
+	await ensureAuthTables(c.env.DB);
+	const token = base64Url(crypto.getRandomValues(new Uint8Array(32)));
+	const tokenHash = await hashToken(token);
+	const createdAt = new Date();
+	const expiresAt = new Date(createdAt.getTime() + SESSION_LIFETIME_MS).toISOString();
+	await c.env.DB.prepare('INSERT INTO auth_sessions (token_hash, created_at, expires_at, last_seen_at) VALUES (?, ?, ?, ?)')
+		.bind(tokenHash, createdAt.toISOString(), expiresAt, createdAt.toISOString())
+		.run();
+	loginFailures.delete(key);
+	const response = c.json({ authenticated: true, expiresAt }, 200);
+	return withCookie(response, sessionCookie(token));
+});
+
+registerOpenApi(authSessionRoute, async (c: LedgerContext) => {
+	const auth = await authenticate(c);
+	if (!auth.authenticated) return c.json({ authenticated: false }, 200);
+	return renewSessionCookie(c, c.json({ authenticated: true, expiresAt: auth.expiresAt }, 200), auth);
+});
+
+registerOpenApi(authLogoutRoute, async (c: LedgerContext) => {
+	if (c.req.header('Origin') || c.req.header('Referer')) {
+		if (!sameOrigin(c)) return jsonError(c, 403, 'forbidden');
+	}
+	const token = readCookie(c.req.raw, SESSION_COOKIE);
+	if (token) {
+		await ensureAuthTables(c.env.DB);
+		await c.env.DB.prepare('DELETE FROM auth_sessions WHERE token_hash = ?').bind(await hashToken(token)).run();
+	}
+	return withCookie(new Response(null, { status: 204 }), sessionCookie('', 0));
+});
+
+app.get('/', async (c) => {
+	if (c.env.ASSETS && c.req.header('Accept')?.includes('text/html')) {
+		const asset = await c.env.ASSETS.fetch(new Request(new URL('/index.html', c.req.url), c.req.raw));
+		if (asset.status !== 404 && (await asset.clone().text())) return asset;
+	}
+	return c.text('Hello World!');
+});
 
 app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', {
 	type: 'http',
@@ -296,8 +518,15 @@ app.doc('/openapi.json', {
 app.get('/docs', swaggerUI({ url: '/openapi.json', persistAuthorization: true }));
 
 app.use('/entries', async (c, next) => {
-	if (!requireAuth(c)) return jsonError(c, 403, 'forbidden');
+	const auth = await authenticate(c);
+	if (!auth.authenticated) return jsonError(c, 403, 'forbidden');
+	const mutating = !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method);
+	const hasSourceHeader = Boolean(c.req.header('Origin') || c.req.header('Referer'));
+	if (mutating && (auth.source === 'session' || hasSourceHeader) && !sameOrigin(c)) {
+		return jsonError(c, 403, 'forbidden');
+	}
 	await next();
+	c.res = renewSessionCookie(c, c.res, auth);
 });
 
 registerOpenApi(createEntryRoute, async (c: LedgerContext) => {
@@ -486,6 +715,18 @@ registerOpenApi(payEntryRoute, async (c: LedgerContext) => {
 	if (!result.meta.changes) return jsonError(c, 409, 'entry was modified');
 	const updated = await c.env.DB.prepare('SELECT * FROM entries WHERE id = ?').bind(id).first<EntryRow>();
 	return c.json({ entry: toEntry(updated as EntryRow) }, 200);
+});
+
+app.notFound(async (c) => {
+	if (c.env.ASSETS) {
+		const assetResponse = await c.env.ASSETS.fetch(c.req.raw);
+		if (assetResponse.status !== 404) return assetResponse;
+		const pathname = new URL(c.req.url).pathname;
+		if (!pathname.includes('.')) {
+			return c.env.ASSETS.fetch(new Request(new URL('/index.html', c.req.url), c.req.raw));
+		}
+	}
+	return c.text('Not Found', 404);
 });
 
 export default app satisfies ExportedHandler<Env>;
