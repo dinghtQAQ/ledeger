@@ -82,6 +82,8 @@ describe('Hono worker', () => {
 	 beforeEach(async () => {
 		await env.DB.prepare('DELETE FROM entries').run();
 		await env.DB.prepare('DELETE FROM auth_sessions').run();
+		await env.DB.prepare('DELETE FROM fine_categories').run().catch(() => undefined);
+		await env.DB.prepare("INSERT INTO ledger_settings (id, payday_day, updated_at) VALUES (1, 20, CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET payday_day = 20, updated_at = CURRENT_TIMESTAMP").run().catch(() => undefined);
 	});
 
 	it('logs in with password and Turnstile, reports the session, and slides expiry', async () => {
@@ -350,5 +352,55 @@ describe('Hono worker', () => {
 		expect(invalidLimit.status).toBe(400);
 		expect(invalidFrom.status).toBe(400);
 		expect(invalidTo.status).toBe(400);
+	});
+
+	it('reads seeded categories and maintains fine categories without physical deletion', async () => {
+		const listed = await request('/categories', { headers: { Authorization: 'Bearer test-key' } });
+		expect(listed.status).toBe(200);
+		expect((await listed.json<any>()).coarseCategories).toEqual([
+			{ id: 1, name: '住房' }, { id: 2, name: '餐饮' }, { id: 3, name: '交通' },
+			{ id: 4, name: '公用' }, { id: 5, name: '健康' }, { id: 6, name: '娱乐' }, { id: 7, name: '投资' },
+		]);
+		const created = await request('/categories/fine', {
+			method: 'POST',
+			headers: { Authorization: 'Bearer test-key', Origin: 'https://example.com', 'Content-Type': 'application/json' },
+			body: JSON.stringify({ name: '房租', coarseCategoryId: 1 }),
+		});
+		expect(created.status).toBe(201);
+		const fine = await created.json<any>();
+		expect(fine).toMatchObject({ name: '房租', coarseCategoryId: 1, isActive: true });
+		const renamed = await request(`/categories/fine/${fine.id}`, {
+			method: 'PATCH',
+			headers: { Authorization: 'Bearer test-key', Origin: 'https://example.com', 'Content-Type': 'application/json' },
+			body: JSON.stringify({ name: '房贷', sortOrder: 4 }),
+		});
+		expect((await renamed.json<any>()).name).toBe('房贷');
+		const disabled = await request(`/categories/fine/${fine.id}/disable`, { method: 'POST', headers: { Authorization: 'Bearer test-key', Origin: 'https://example.com' } });
+		expect((await disabled.json<any>()).isActive).toBe(false);
+		const deleted = await request(`/categories/fine/${fine.id}`, { method: 'DELETE', headers: { Authorization: 'Bearer test-key', Origin: 'https://example.com' } });
+		expect(deleted.status).toBe(409);
+	});
+
+	it('validates fine category ownership, inactive state, and payday boundaries', async () => {
+		const created = await request('/categories/fine', {
+			method: 'POST', headers: { Authorization: 'Bearer test-key', Origin: 'https://example.com', 'Content-Type': 'application/json' },
+			body: JSON.stringify({ name: '早餐', coarseCategoryId: 2 }),
+		});
+		const fine = await created.json<any>();
+		const wrongParent = await createEntry({ categoryId: 1, subcategoryId: fine.id }, 'wrong-parent');
+		expect(wrongParent.response.status).toBe(400);
+		await request(`/categories/fine/${fine.id}/disable`, { method: 'POST', headers: { Authorization: 'Bearer test-key', Origin: 'https://example.com' } });
+		const inactive = await createEntry({ categoryId: 2, subcategoryId: fine.id }, 'inactive-fine');
+		expect(inactive.response.status).toBe(400);
+		const missing = await createEntry({ category: null, categoryId: null }, 'missing-coarse');
+		expect(missing.response.status).toBe(400);
+		const income = await createEntry({ type: 'income', category: null, categoryId: null }, 'income-without-category');
+		expect(income.response.status).toBe(201);
+		const invalidLow = await request('/settings/ledger', { method: 'PUT', headers: { Authorization: 'Bearer test-key', Origin: 'https://example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ paydayDay: 0 }) });
+		const invalidHigh = await request('/settings/ledger', { method: 'PUT', headers: { Authorization: 'Bearer test-key', Origin: 'https://example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ paydayDay: 29 }) });
+		expect(invalidLow.status).toBe(400);
+		expect(invalidHigh.status).toBe(400);
+		const updated = await request('/settings/ledger', { method: 'PUT', headers: { Authorization: 'Bearer test-key', Origin: 'https://example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ paydayDay: 1 }) });
+		expect(await updated.json<any>()).toMatchObject({ paydayDay: 1, timezone: 'Asia/Shanghai' });
 	});
 });

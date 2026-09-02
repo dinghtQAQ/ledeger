@@ -10,6 +10,13 @@ import {
 	healthSchema,
 	authLoginSchema,
 	authSessionSchema,
+	categoriesResponseSchema,
+	coarseCategorySchema,
+	fineCategoryCreateSchema,
+	fineCategoryPatchSchema,
+	fineCategorySchema,
+	ledgerSettingsSchema,
+	ledgerSettingsUpdateSchema,
 	idParamSchema,
 	listQuerySchema,
 	reversalResponseSchema,
@@ -35,6 +42,8 @@ type EntryRow = {
 	due_at: string | null;
 	due_status: DueStatus | null;
 	category: string | null;
+	category_id?: number | null;
+	subcategory_id?: number | null;
 	note: string | null;
 	is_reversal: number;
 	reversal_of: string | null;
@@ -51,6 +60,9 @@ type CursorContext = {
 	from: string | null;
 	to: string | null;
 	category: string | null;
+	type: string | null;
+	categoryId: number | null;
+	subcategoryId: number | null;
 };
 type CursorPayload = { key: string; id: string; context: CursorContext };
 type CreateEntryInput = {
@@ -59,6 +71,8 @@ type CreateEntryInput = {
 	occurredAt: string;
 	dueAt?: string;
 	category?: string | null;
+	categoryId?: number | null;
+	subcategoryId?: number | null;
 	note?: string | null;
 };
 type ListEntriesQuery = {
@@ -67,6 +81,9 @@ type ListEntriesQuery = {
 	from?: string;
 	to?: string;
 	category?: string;
+	type?: EntryType;
+	categoryId?: number;
+	subcategoryId?: number;
 	sort: Sort;
 };
 
@@ -106,6 +123,29 @@ async function ensureAuthTables(db: D1Database) {
 			)`,
 		)
 		.run();
+}
+
+async function ensureCategoryTables(db: D1Database) {
+	await db.prepare(`CREATE TABLE IF NOT EXISTS coarse_categories (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE)`).run();
+	await db.prepare(`CREATE TABLE IF NOT EXISTS fine_categories (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL,
+		coarse_category_id INTEGER NOT NULL,
+		sort_order INTEGER NOT NULL DEFAULT 0,
+		is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1))
+	)`).run();
+	await db.prepare(`CREATE TABLE IF NOT EXISTS ledger_settings (
+		id INTEGER PRIMARY KEY CHECK (id = 1),
+		payday_day INTEGER NOT NULL DEFAULT 20 CHECK (payday_day BETWEEN 1 AND 28),
+		updated_at TEXT NOT NULL
+	)`).run();
+	await db.prepare(`INSERT OR IGNORE INTO coarse_categories (id, name) VALUES
+		(1, '住房'), (2, '餐饮'), (3, '交通'), (4, '公用'), (5, '健康'), (6, '娱乐'), (7, '投资')`).run();
+	await db.prepare(`INSERT OR IGNORE INTO ledger_settings (id, payday_day, updated_at) VALUES (1, 20, ?)`).bind(now()).run();
+	for (const column of ['category_id', 'subcategory_id']) {
+		try { await db.prepare(`ALTER TABLE entries ADD COLUMN ${column} INTEGER`).run(); } catch { /* already present */ }
+	}
+	await db.prepare('CREATE INDEX IF NOT EXISTS idx_fine_categories_parent_order ON fine_categories (coarse_category_id, sort_order, id)').run();
 }
 
 function base64Url(bytes: ArrayBuffer | Uint8Array) {
@@ -245,6 +285,8 @@ function toEntry(row: EntryRow) {
 		dueAt: row.due_at,
 		dueStatus: row.due_status,
 		category: row.category,
+		categoryId: row.category_id ?? null,
+		subcategoryId: row.subcategory_id ?? null,
 		note: row.note,
 		isReversal: row.is_reversal === 1,
 		reversalOf: row.reversal_of,
@@ -282,15 +324,21 @@ function isCursorPayload(value: unknown): value is CursorPayload {
 		(candidate.context.from === null || typeof candidate.context.from === 'string') &&
 		(candidate.context.to === null || typeof candidate.context.to === 'string') &&
 		(candidate.context.category === null || typeof candidate.context.category === 'string')
+		&& (candidate.context.type === undefined || candidate.context.type === null || typeof candidate.context.type === 'string')
+		&& (candidate.context.categoryId === undefined || candidate.context.categoryId === null || typeof candidate.context.categoryId === 'number')
+		&& (candidate.context.subcategoryId === undefined || candidate.context.subcategoryId === null || typeof candidate.context.subcategoryId === 'number')
 	);
 }
 
-function cursorContext(query: { sort: string; from?: string; to?: string; category?: string }): CursorContext {
+function cursorContext(query: { sort: string; from?: string; to?: string; category?: string; type?: string; categoryId?: number; subcategoryId?: number }): CursorContext {
 	return {
 		sort: query.sort,
 		from: query.from ?? null,
 		to: query.to ?? null,
 		category: query.category ?? null,
+		type: query.type ?? null,
+		categoryId: query.categoryId ?? null,
+		subcategoryId: query.subcategoryId ?? null,
 	};
 }
 
@@ -431,6 +479,78 @@ const payEntryRoute = createRoute({
 	},
 });
 
+const categoriesRoute = createRoute({
+	method: 'get',
+	path: '/categories',
+	security: [{ bearerAuth: [] }],
+	responses: {
+		200: { description: 'Categories', content: { 'application/json': { schema: categoriesResponseSchema } } },
+		403: errorResponse,
+	},
+});
+
+const fineCategoryCreateRoute = createRoute({
+	method: 'post',
+	path: '/categories/fine',
+	security: [{ bearerAuth: [] }],
+	request: { body: { required: true, content: { 'application/json': { schema: fineCategoryCreateSchema } } } },
+	responses: {
+		201: { description: 'Created', content: { 'application/json': { schema: fineCategorySchema } } },
+		400: errorResponse,
+		403: errorResponse,
+	},
+});
+
+const fineCategoryPatchRoute = createRoute({
+	method: 'patch',
+	path: '/categories/fine/{id}',
+	security: [{ bearerAuth: [] }],
+	request: {
+		params: idParamSchema,
+		body: { required: true, content: { 'application/json': { schema: fineCategoryPatchSchema } } },
+	},
+	responses: {
+		200: { description: 'Updated', content: { 'application/json': { schema: fineCategorySchema } } },
+		400: errorResponse,
+		403: errorResponse,
+		404: errorResponse,
+	},
+});
+
+const fineCategoryDisableRoute = createRoute({
+	method: 'post',
+	path: '/categories/fine/{id}/disable',
+	security: [{ bearerAuth: [] }],
+	request: { params: idParamSchema },
+	responses: {
+		200: { description: 'Disabled', content: { 'application/json': { schema: fineCategorySchema } } },
+		403: errorResponse,
+		404: errorResponse,
+	},
+});
+
+const ledgerSettingsGetRoute = createRoute({
+	method: 'get',
+	path: '/settings/ledger',
+	security: [{ bearerAuth: [] }],
+	responses: {
+		200: { description: 'Ledger settings', content: { 'application/json': { schema: ledgerSettingsSchema } } },
+		403: errorResponse,
+	},
+});
+
+const ledgerSettingsPutRoute = createRoute({
+	method: 'put',
+	path: '/settings/ledger',
+	security: [{ bearerAuth: [] }],
+	request: { body: { required: true, content: { 'application/json': { schema: ledgerSettingsUpdateSchema } } } },
+	responses: {
+		200: { description: 'Updated settings', content: { 'application/json': { schema: ledgerSettingsSchema } } },
+		400: errorResponse,
+		403: errorResponse,
+	},
+});
+
 registerOpenApi(healthRoute, (c: LedgerContext) => c.json({ status: 'ok' }, 200));
 
 registerOpenApi(healthDbRoute, async (c: LedgerContext) => {
@@ -517,6 +637,20 @@ app.doc('/openapi.json', {
 
 app.get('/docs', swaggerUI({ url: '/openapi.json', persistAuthorization: true }));
 
+async function protectApi(c: LedgerContext, next: () => Promise<void>) {
+	const auth = await authenticate(c);
+	if (!auth.authenticated) return jsonError(c, 403, 'forbidden') as never;
+	const mutating = !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method);
+	const hasSourceHeader = Boolean(c.req.header('Origin') || c.req.header('Referer'));
+	if (mutating && (auth.source === 'session' || hasSourceHeader) && !sameOrigin(c)) return jsonError(c, 403, 'forbidden') as never;
+	await ensureCategoryTables(c.env.DB);
+	await next();
+	c.res = renewSessionCookie(c, c.res, auth);
+}
+
+app.use('/categories', protectApi);
+app.use('/settings', protectApi);
+
 app.use('/entries', async (c, next) => {
 	const auth = await authenticate(c);
 	if (!auth.authenticated) return jsonError(c, 403, 'forbidden');
@@ -525,8 +659,83 @@ app.use('/entries', async (c, next) => {
 	if (mutating && (auth.source === 'session' || hasSourceHeader) && !sameOrigin(c)) {
 		return jsonError(c, 403, 'forbidden');
 	}
+	await ensureCategoryTables(c.env.DB);
 	await next();
 	c.res = renewSessionCookie(c, c.res, auth);
+});
+
+function toFineCategory(row: { id: number; name: string; coarse_category_id: number; sort_order: number; is_active: number }) {
+	return {
+		id: row.id,
+		name: row.name,
+		coarseCategoryId: row.coarse_category_id,
+		sortOrder: row.sort_order,
+		isActive: row.is_active === 1,
+	};
+}
+
+registerOpenApi(categoriesRoute, async (c: LedgerContext) => {
+	const coarse = await c.env.DB.prepare('SELECT id, name FROM coarse_categories ORDER BY id').all<{ id: number; name: string }>();
+	const fine = await c.env.DB.prepare('SELECT id, name, coarse_category_id, sort_order, is_active FROM fine_categories ORDER BY coarse_category_id, sort_order, id').all<{
+		id: number; name: string; coarse_category_id: number; sort_order: number; is_active: number;
+	}>();
+	return c.json({ coarseCategories: coarse.results, fineCategories: fine.results.map(toFineCategory) }, 200);
+});
+
+registerOpenApi(fineCategoryCreateRoute, async (c: LedgerContext) => {
+	const input = validated<{ name: string; coarseCategoryId: number; sortOrder?: number }>(c, 'json');
+	const parent = await c.env.DB.prepare('SELECT id FROM coarse_categories WHERE id = ?').bind(input.coarseCategoryId).first();
+	if (!parent) return jsonError(c, 400, 'invalid coarse category');
+	let sortOrder = input.sortOrder;
+	if (sortOrder === undefined) {
+		const last = await c.env.DB.prepare('SELECT COALESCE(MAX(sort_order), -1) AS value FROM fine_categories WHERE coarse_category_id = ?').bind(input.coarseCategoryId).first<{ value: number }>();
+		sortOrder = (last?.value ?? -1) + 1;
+	}
+	const result = await c.env.DB.prepare('INSERT INTO fine_categories (name, coarse_category_id, sort_order, is_active) VALUES (?, ?, ?, 1)')
+		.bind(input.name, input.coarseCategoryId, sortOrder).run();
+	const row = await c.env.DB.prepare('SELECT id, name, coarse_category_id, sort_order, is_active FROM fine_categories WHERE id = ?').bind(result.meta.last_row_id).first<{
+		id: number; name: string; coarse_category_id: number; sort_order: number; is_active: number;
+	}>();
+	return c.json(toFineCategory(row!), 201);
+});
+
+registerOpenApi(fineCategoryPatchRoute, async (c: LedgerContext) => {
+	const { id } = validated<{ id: string }>(c, 'param');
+	const input = validated<{ name?: string; sortOrder?: number }>(c, 'json');
+	const existing = await c.env.DB.prepare('SELECT id, name, coarse_category_id, sort_order, is_active FROM fine_categories WHERE id = ?').bind(Number(id)).first<{
+		id: number; name: string; coarse_category_id: number; sort_order: number; is_active: number;
+	}>();
+	if (!existing) return jsonError(c, 404, 'fine category not found');
+	const name = input.name ?? existing.name;
+	const sortOrder = input.sortOrder ?? existing.sort_order;
+	await c.env.DB.prepare('UPDATE fine_categories SET name = ?, sort_order = ? WHERE id = ?').bind(name, sortOrder, existing.id).run();
+	return c.json(toFineCategory({ ...existing, name, sort_order: sortOrder }), 200);
+});
+
+registerOpenApi(fineCategoryDisableRoute, async (c: LedgerContext) => {
+	const { id } = validated<{ id: string }>(c, 'param');
+	const existing = await c.env.DB.prepare('SELECT id, name, coarse_category_id, sort_order, is_active FROM fine_categories WHERE id = ?').bind(Number(id)).first<{
+		id: number; name: string; coarse_category_id: number; sort_order: number; is_active: number;
+	}>();
+	if (!existing) return jsonError(c, 404, 'fine category not found');
+	await c.env.DB.prepare('UPDATE fine_categories SET is_active = 0 WHERE id = ?').bind(existing.id).run();
+	return c.json(toFineCategory({ ...existing, is_active: 0 }), 200);
+});
+
+app.delete('/categories/fine/:id', (c: LedgerContext) => jsonError(c, 409, 'fine categories cannot be deleted'));
+
+registerOpenApi(ledgerSettingsGetRoute, async (c: LedgerContext) => {
+	const row = await c.env.DB.prepare('SELECT payday_day FROM ledger_settings WHERE id = 1').first<{ payday_day: number }>();
+	return c.json({ paydayDay: row?.payday_day ?? 20, timezone: c.env.LEDGER_TIMEZONE || 'Asia/Shanghai' }, 200);
+});
+
+registerOpenApi(ledgerSettingsPutRoute, async (c: LedgerContext) => {
+	const input = validated<{ paydayDay?: number; paydayAnchor?: number; payday?: number }>(c, 'json');
+	const paydayDay = input.paydayDay ?? input.paydayAnchor ?? input.payday;
+	if (!paydayDay || paydayDay < 1 || paydayDay > 28) return jsonError(c, 400, 'paydayDay must be between 1 and 28');
+	await c.env.DB.prepare('INSERT INTO ledger_settings (id, payday_day, updated_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET payday_day = excluded.payday_day, updated_at = excluded.updated_at')
+		.bind(paydayDay, now()).run();
+	return c.json({ paydayDay, timezone: c.env.LEDGER_TIMEZONE || 'Asia/Shanghai' }, 200);
 });
 
 registerOpenApi(createEntryRoute, async (c: LedgerContext) => {
@@ -541,9 +750,21 @@ registerOpenApi(createEntryRoute, async (c: LedgerContext) => {
 	}
 	const occurredAt = new Date(input.occurredAt).toISOString();
 	const dueAt = input.type === 'due_expense' ? new Date(input.dueAt!).toISOString() : null;
+	const categoryId = input.categoryId ?? null;
+	const subcategoryId = input.subcategoryId ?? null;
+	if (input.type === 'expense' && categoryId === null && !input.category) return jsonError(c, 400, 'expense category is required');
+	if (subcategoryId !== null && categoryId === null) return jsonError(c, 400, 'subcategory requires a coarse category');
+	if (categoryId !== null) {
+		const coarse = await c.env.DB.prepare('SELECT id FROM coarse_categories WHERE id = ?').bind(categoryId).first();
+		if (!coarse) return jsonError(c, 400, 'invalid coarse category');
+	}
+	if (subcategoryId !== null) {
+		const fine = await c.env.DB.prepare('SELECT id FROM fine_categories WHERE id = ? AND coarse_category_id = ? AND is_active = 1').bind(subcategoryId, categoryId).first();
+		if (!fine) return jsonError(c, 400, 'invalid or inactive fine category');
+	}
 	const category = input.category ?? null;
 	const note = input.note ?? null;
-	const payload = JSON.stringify({ type: input.type, amount, occurredAt, dueAt, category, note });
+	const payload = JSON.stringify({ type: input.type, amount, occurredAt, dueAt, category, categoryId, subcategoryId, note });
 	const existing = await c.env.DB.prepare('SELECT * FROM entries WHERE idempotency_key = ?').bind(idempotencyKey).first<StoredEntryRow>();
 	if (existing) {
 		if (existing.idempotency_payload !== payload) {
@@ -558,8 +779,8 @@ registerOpenApi(createEntryRoute, async (c: LedgerContext) => {
 		await c.env.DB.prepare(
 			`INSERT INTO entries (
 				id, type, amount_units, occurred_at, due_at, due_status,
-				category, note, idempotency_key, idempotency_payload, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				category, category_id, subcategory_id, note, idempotency_key, idempotency_payload, created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 			.bind(
 				id,
@@ -569,6 +790,8 @@ registerOpenApi(createEntryRoute, async (c: LedgerContext) => {
 				dueAt,
 				input.type === 'due_expense' ? 'unpaid' : null,
 				category,
+				categoryId,
+				subcategoryId,
 				note,
 				idempotencyKey,
 				payload,
@@ -612,6 +835,18 @@ registerOpenApi(listEntriesRoute, async (c: LedgerContext) => {
 	if (query.category) {
 		where.push('category = ?');
 		bindings.push(query.category);
+	}
+	if (query.type) {
+		where.push('type = ?');
+		bindings.push(query.type);
+	}
+	if (query.categoryId !== undefined) {
+		where.push('category_id = ?');
+		bindings.push(query.categoryId);
+	}
+	if (query.subcategoryId !== undefined) {
+		where.push('subcategory_id = ?');
+		bindings.push(query.subcategoryId);
 	}
 
 	const context = cursorContext(query);
@@ -666,15 +901,17 @@ registerOpenApi(reverseEntryRoute, async (c: LedgerContext) => {
 		await c.env.DB.batch([
 			c.env.DB.prepare(
 				`INSERT INTO entries (
-					id, type, amount_units, occurred_at, category, note,
+					id, type, amount_units, occurred_at, category, category_id, subcategory_id, note,
 					is_reversal, reversal_of, created_at, updated_at
-				) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
-			).bind(
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+				).bind(
 				reversalId,
 				reverseType,
 				row.amount_units,
 				row.occurred_at,
 				row.category,
+				row.category_id ?? null,
+				row.subcategory_id ?? null,
 				`Reversal of ${row.id}${row.note ? `: ${row.note}` : ''}`,
 				id,
 				timestamp,
