@@ -40,6 +40,12 @@ pnpm run deploy           # 发布到 Cloudflare Workers
 - `DELETE /entries/:id`：执行一次完整冲正，不物理删除
 - `POST /entries/:id/pay`：将到期支出标记为已付款
 
+设计记录：
+
+- [领域词汇表](CONTEXT.md)
+- [需求访谈与设计树](docs/ledger-design-log.md)
+- [架构决策记录](docs/adr/)
+
 ## 记账规则
 
 - 账目类型为 `income`、`expense`、`due_expense`。
