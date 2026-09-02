@@ -32,6 +32,30 @@ pnpm run deploy           # 发布到 Cloudflare Workers
 - `GET /`：返回 Worker smoke response
 - `GET /health`：返回 Hono JSON 健康状态
 - `GET /health/db`：通过 D1 执行 `SELECT 1`，验证数据库 binding
+- `GET /openapi.json`：OpenAPI 3.0 文档
+- `GET /docs`：Swagger UI 交互式 API 文档
+- `POST /entries`：创建收入、支出或到期支出（必须携带 Bearer 鉴权和 `Idempotency-Key`）
+- `GET /entries`：游标分页，支持 `from`、`to`、`category`、`sort` 和 `limit`
+- `GET /entries/:id`：查询单笔账目
+- `DELETE /entries/:id`：执行一次完整冲正，不物理删除
+- `POST /entries/:id/pay`：将到期支出标记为已付款
+
+## 记账规则
+
+- 账目类型为 `income`、`expense`、`due_expense`。
+- 金额必须使用十进制字符串，且为正数；输入超过 4 位小数时按半入规则舍入到 4 位。
+- D1 以四位小数整数单位作为金额的唯一存储源；响应中的 `amount` 由该单位还原，`displayAmount` 默认显示三位小数。
+- 冲正会保留原记录，并在同一 D1 batch 中写入等额反向记录；同一账目只能冲正一次。
+- 到期支出有 `unpaid`、`paid`、`cancelled` 状态；冲正会将原到期支出置为 `cancelled`，付款只改变状态，不创建重复账目。
+- 数据库时间保存为 UTC；日期筛选按 `LEDGER_TIMEZONE` 解释，默认 `Asia/Shanghai`。
+
+业务接口鉴权：
+
+```text
+Authorization: Bearer <LEDGER_API_KEY>
+```
+
+`/health`、`/health/db`、`/docs`、`/openapi.json` 公开访问；业务接口未配置或未提供正确密钥时返回 `403`。
 
 ## 发布流程
 
@@ -53,12 +77,21 @@ Workers Builds 建议配置：
 
 ## 配置与密钥
 
-- Worker 配置唯一来源为 `wrangler.jsonc`。
+- 公共 Worker 配置放在 `wrangler.jsonc`；个人生产配置使用未提交的独立 Wrangler 配置文件。
 - 本地非敏感变量放在 `.dev.vars`；敏感变量使用 `.dev.vars` 文件或 `.dev.vars.example` 约定，均不会提交。
 - 线上密钥使用 `pnpm exec wrangler secret put <NAME>` 写入，不放进仓库。
 - D1 binding 名称为 `DB`，数据库名为 `ledeger-db`。
-- 当前尚未定义业务表；新增表时使用 Wrangler migration，不要在请求处理器中执行建表。
+- 业务表通过 `migrations/0001_entries.sql` 创建；不要在请求处理器中执行建表。
 - 尚未声明 KV、Durable Objects、R2 或其他 bindings；等业务需求确定后再添加。
+
+本地开发变量可参考已提交的 `.dev.vars.example`，实际值放在未提交的 `.dev.vars`：
+
+```text
+LEDGER_API_KEY=replace-with-a-local-secret
+LEDGER_TIMEZONE=Asia/Shanghai
+```
+
+生产环境请使用单独的未提交 Wrangler 配置文件（例如 `wrangler.production.jsonc`），在其中填写生产 D1 的 `database_id`，并通过 `--config wrangler.production.jsonc` 部署。不要把个人 D1 ID 或密钥写入公共配置。
 
 首次创建 D1 数据库（只需执行一次）：
 
@@ -66,7 +99,7 @@ Workers Builds 建议配置：
 pnpm exec wrangler d1 create ledeger-db
 ```
 
-将命令输出的 `database_id` 写入 `wrangler.jsonc` 的 D1 binding，然后运行：
+将命令输出的 `database_id` 写入个人未提交的 Wrangler 配置文件，然后运行：
 
 ```bash
 pnpm run cf-typegen

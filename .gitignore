@@ -53,6 +53,10 @@ build/Release
 node_modules/
 jspm_packages/
 
+# Local Worker secrets and production bindings
+.dev.vars
+wrangler.production.jsonc
+
 # Snowpack dependency directory (https://snowpack.dev/)
 
 web_modules/
