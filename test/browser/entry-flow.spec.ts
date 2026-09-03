@@ -82,3 +82,34 @@ test.describe('新增收入与普通支出', () => {
 		expect(postCount).toBe(2);
 	});
 });
+
+test.describe('账目列表与详情', () => {
+	test('支持游标加载更多并跳转到账目详情', async ({ page }) => {
+		const first = {
+			id: 'browser-entry-1', type: 'expense', amount: '12.0000', displayAmount: '12.000', occurredAt: '2026-09-02T10:00:00.000Z',
+			category: '餐饮', categoryId: 2, subcategoryId: null, note: '第一页', isReversal: false, reversalOf: null, reversedAt: null,
+		};
+		const second = { ...first, id: 'browser-entry-2', occurredAt: '2026-09-01T10:00:00.000Z', note: '第二页' };
+		let listCalls = 0;
+		await page.route('**/entries?*', async (route) => {
+			if (route.request().method() !== 'GET') return route.continue();
+			const url = new URL(route.request().url());
+			if (url.searchParams.get('limit') === '100') {
+				return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [first, second], nextCursor: null }) });
+			}
+			listCalls += 1;
+			if (listCalls === 1) return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [first], nextCursor: 'cursor-1' }) });
+			return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [second], nextCursor: null }) });
+		});
+		await page.route('**/entries/browser-entry-1', async (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ entry: first }) }));
+		await login(page);
+		await page.getByRole('link', { name: '账目' }).click();
+		await expect(page.getByText('第一页')).toBeVisible();
+		await page.getByRole('button', { name: '加载更多' }).click();
+		await expect(page.getByText('第二页')).toBeVisible();
+		await page.getByRole('link', { name: /支出/ }).first().click();
+		await expect(page).toHaveURL(/\/entries\/browser-entry-1$/);
+		await expect(page.getByRole('heading', { name: '账目详情' })).toBeVisible();
+		await expect(page.getByText('第一页')).toBeVisible();
+	});
+});

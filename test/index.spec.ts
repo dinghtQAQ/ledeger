@@ -363,6 +363,34 @@ describe('Hono worker', () => {
 		expect((await second.json<any>()).items[0].note).toBe('first');
 	});
 
+	it('filters entries by type, coarse category, and fine category', async () => {
+		const fineResponse = await request('/categories/fine', {
+			method: 'POST',
+			headers: { Authorization: 'Bearer test-key', Origin: 'https://example.com', 'Content-Type': 'application/json' },
+			body: JSON.stringify({ name: '午餐', coarseCategoryId: 2 }),
+		});
+		const fine = await fineResponse.json<any>();
+		await createEntry({ type: 'expense', categoryId: 2, subcategoryId: fine.id, category: null, note: '餐饮命中' }, 'filter-hit');
+		await createEntry({ type: 'expense', categoryId: 1, category: null, note: '粗类不命中' }, 'filter-miss-coarse');
+		await createEntry({ type: 'income', categoryId: null, subcategoryId: null, category: null, note: '类型不命中' }, 'filter-miss-type');
+
+		const byType = await request('/entries?type=expense', { headers: { Authorization: 'Bearer test-key' } });
+		const byCoarse = await request('/entries?categoryId=2', { headers: { Authorization: 'Bearer test-key' } });
+		const byFine = await request(`/entries?subcategoryId=${fine.id}`, { headers: { Authorization: 'Bearer test-key' } });
+		expect((await byType.json<any>()).items.map((item: any) => item.note)).toEqual(expect.arrayContaining(['餐饮命中', '粗类不命中']));
+		expect((await byCoarse.json<any>()).items.map((item: any) => item.note)).toEqual(['餐饮命中']);
+		expect((await byFine.json<any>()).items.map((item: any) => item.note)).toEqual(['餐饮命中']);
+	});
+
+	it('retrieves an entry detail and reports missing records', async () => {
+		const created = await createEntry({ note: 'detail lookup' }, 'detail-lookup');
+		const detail = await request(`/entries/${created.body.entry.id}`, { headers: { Authorization: 'Bearer test-key' } });
+		expect(detail.status).toBe(200);
+		expect((await detail.json<any>()).entry).toMatchObject({ id: created.body.entry.id, note: 'detail lookup', amount: '10' });
+		const missing = await request('/entries/missing-entry', { headers: { Authorization: 'Bearer test-key' } });
+		expect(missing.status).toBe(404);
+	});
+
 	it('validates pagination and calendar dates', async () => {
 		const invalidLimit = await request('/entries?limit=abc', { headers: { Authorization: 'Bearer test-key' } });
 		const invalidFrom = await request('/entries?from=2026-99-99', { headers: { Authorization: 'Bearer test-key' } });

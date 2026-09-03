@@ -20,6 +20,12 @@ type Entry = {
 	note: string | null;
 	isReversal: boolean;
 	reversalOf: string | null;
+	reversedAt?: string | null;
+	dueAt?: string | null;
+	dueStatus?: 'unpaid' | 'paid' | 'cancelled' | null;
+	version?: number;
+	createdAt?: string;
+	updatedAt?: string;
 };
 type EntryPage = { items: Entry[]; nextCursor: string | null };
 
@@ -62,6 +68,17 @@ function dateTimeLocalToIso(value: string) {
 	return new Date(value).toISOString();
 }
 
+function nextCalendarDate(value: string) {
+	if (!value) return '';
+	const date = new Date(`${value}T00:00:00`);
+	date.setDate(date.getDate() + 1);
+	return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function entryTypeLabel(type: EntryType) {
+	return type === 'income' ? '收入' : type === 'expense' ? '支出' : '到期支出';
+}
+
 function createIdempotencyKey() {
 	return crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
@@ -77,10 +94,10 @@ function isPositiveAccountingAmount(value: string) {
 }
 
 function displayEntryCategory(entry: Entry, categories: CategoriesResponse | null) {
-	if (entry.category) return entry.category;
 	const coarse = categories?.coarseCategories.find((item) => item.id === entry.categoryId);
 	const fine = categories?.fineCategories.find((item) => item.id === entry.subcategoryId);
 	if (fine && coarse) return `${coarse.name} / ${fine.name}`;
+	if (entry.category) return entry.category;
 	return coarse?.name || (entry.type === 'income' ? '未分类收入' : '未分类');
 }
 
@@ -160,7 +177,8 @@ function LoginPage({ onLogin }: { onLogin: (session: Session) => void }) {
 
 function AppShell({ session, onLogout }: { session: Session; onLogout: () => void }) {
 	const path = window.location.pathname;
-	const title = path === '/analytics' ? '分析' : path === '/entries' ? '账目' : path === '/entries/new' ? '新增记账' : path === '/settings' ? '设置' : '分析';
+	const isEntryDetail = /^\/entries\/[^/]+$/.test(path);
+	const title = path === '/analytics' ? '分析' : path === '/entries' ? '账目' : path === '/entries/new' ? '新增记账' : isEntryDetail ? '账目详情' : path === '/settings' ? '设置' : '分析';
 	return (
 		<div className="app-shell">
 			<header className="topbar">
@@ -174,27 +192,49 @@ function AppShell({ session, onLogout }: { session: Session; onLogout: () => voi
 			</header>
 			<main className="content">
 				<div className="content-heading"><div><p className="eyebrow">CURRENT WORKSPACE</p><h1>{title}</h1></div><span className="session-dot" title={session.expiresAt ? `会话有效至 ${new Date(session.expiresAt).toLocaleString()}` : '会话有效'} /></div>
-				{title === '分析' ? <AnalyticsPreview /> : path === '/settings' ? <SettingsPage /> : path === '/entries/new' ? <NewEntryPage /> : path === '/entries' ? <EntriesPage /> : <section className="empty-state"><h2>{title}功能即将展开</h2><p>当前会话已建立，接口可以直接使用。</p></section>}
+				{title === '分析' ? <AnalyticsPreview /> : path === '/settings' ? <SettingsPage /> : path === '/entries/new' ? <NewEntryPage /> : path === '/entries' ? <EntriesPage /> : isEntryDetail ? <EntryDetailsPage id={path.split('/')[2]} /> : <section className="empty-state"><h2>{title}功能即将展开</h2><p>当前会话已建立，接口可以直接使用。</p></section>}
 			</main>
 		</div>
 	);
 }
 
 function EntriesPage() {
-	const [page, setPage] = useState<EntryPage | null>(null);
+	const [items, setItems] = useState<Entry[]>([]);
+	const [nextCursor, setNextCursor] = useState<string | null>(null);
 	const [categories, setCategories] = useState<CategoriesResponse | null>(null);
+	const [from, setFrom] = useState('');
+	const [to, setTo] = useState('');
+	const [type, setType] = useState('');
+	const [categoryId, setCategoryId] = useState('');
+	const [subcategoryId, setSubcategoryId] = useState('');
+	const [sort, setSort] = useState('occurredAt.desc');
 	const [error, setError] = useState('');
+	const [loadMoreError, setLoadMoreError] = useState('');
 	const [loading, setLoading] = useState(true);
+	const [loadingMore, setLoadingMore] = useState(false);
+
+	function queryString(cursor?: string) {
+		const params = new URLSearchParams({ limit: '50', sort });
+		if (from) params.set('from', from);
+		if (to) params.set('to', nextCalendarDate(to));
+		if (type) params.set('type', type);
+		if (categoryId) params.set('categoryId', categoryId);
+		if (subcategoryId) params.set('subcategoryId', subcategoryId);
+		if (cursor) params.set('cursor', cursor);
+		return `/entries?${params.toString()}`;
+	}
 
 	async function loadEntries() {
 		setLoading(true);
 		setError('');
+		setLoadMoreError('');
 		try {
 			const [nextPage, nextCategories] = await Promise.all([
-				api<EntryPage>('/entries?limit=50&sort=occurredAt.desc'),
+				api<EntryPage>(queryString()),
 				api<CategoriesResponse>('/categories'),
 			]);
-			setPage(nextPage);
+			setItems(nextPage.items);
+			setNextCursor(nextPage.nextCursor);
 			setCategories(nextCategories);
 		} catch (caught) {
 			setError(caught instanceof Error ? caught.message : '账目加载失败');
@@ -203,16 +243,101 @@ function EntriesPage() {
 		}
 	}
 
+	async function loadMore() {
+		if (!nextCursor || loadingMore) return;
+		setLoadingMore(true);
+		setLoadMoreError('');
+		try {
+			const nextPage = await api<EntryPage>(queryString(nextCursor));
+			setItems((current) => [...current, ...nextPage.items]);
+			setNextCursor(nextPage.nextCursor);
+		} catch (caught) {
+			setLoadMoreError(caught instanceof Error ? caught.message : '加载更多失败');
+		} finally {
+			setLoadingMore(false);
+		}
+	}
+
+	function resetAndLoad() {
+		void loadEntries();
+	}
+
 	useEffect(() => { void loadEntries(); }, []);
 
 	if (loading) return <section className="empty-state"><p>正在加载账目…</p></section>;
 	if (error) return <section className="empty-state"><p className="error" role="alert">{error}</p><button type="button" onClick={() => void loadEntries()}>重试</button></section>;
 	return <section className="entries-layout">
-		<div className="entries-toolbar"><div><p className="eyebrow">LEDGER ENTRIES</p><p className="muted">最近 {page?.items.length ?? 0} 笔记录</p></div><button type="button" className="primary-button" onClick={() => navigate('/entries/new')}>新增账目</button></div>
-		{page?.items.length ? <div className="entry-list">{page.items.map((entry) => <article className={`entry-row ${entry.isReversal ? 'reversal' : ''}`} key={entry.id}>
-			<div className="entry-main"><strong>{entry.type === 'income' ? '收入' : entry.type === 'expense' ? '支出' : '到期支出'}{entry.isReversal && ' · 冲正'}</strong><span className="muted">{displayEntryCategory(entry, categories)}</span><span className="muted">{new Date(entry.occurredAt).toLocaleString('zh-CN')}</span></div>
+		<div className="entries-toolbar"><div><p className="eyebrow">LEDGER ENTRIES</p><p className="muted">当前显示 {items.length} 笔记录</p></div><button type="button" className="primary-button" onClick={() => navigate('/entries/new')}>新增账目</button></div>
+		<form className="entries-filters" onSubmit={(event) => { event.preventDefault(); resetAndLoad(); }}>
+			<div><label htmlFor="entries-from">开始日期</label><input id="entries-from" type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></div>
+			<div><label htmlFor="entries-to">结束日期</label><input id="entries-to" type="date" value={to} onChange={(event) => setTo(event.target.value)} /></div>
+			<div><label htmlFor="entries-type">类型</label><select id="entries-type" value={type} onChange={(event) => setType(event.target.value)}><option value="">全部类型</option><option value="income">收入</option><option value="expense">支出</option><option value="due_expense">到期支出</option></select></div>
+			<div><label htmlFor="entries-category">粗分类</label><select id="entries-category" value={categoryId} onChange={(event) => { setCategoryId(event.target.value); setSubcategoryId(''); }}><option value="">全部粗分类</option>{categories?.coarseCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></div>
+			<div><label htmlFor="entries-subcategory">细分类</label><select id="entries-subcategory" value={subcategoryId} disabled={!categoryId} onChange={(event) => setSubcategoryId(event.target.value)}><option value="">全部细分类</option>{categories?.fineCategories.filter((fine) => !categoryId || String(fine.coarseCategoryId) === categoryId).map((fine) => <option key={fine.id} value={fine.id}>{fine.name}{!fine.isActive ? '（已停用）' : ''}</option>)}</select></div>
+			<div><label htmlFor="entries-sort">排序</label><select id="entries-sort" value={sort} onChange={(event) => setSort(event.target.value)}><option value="occurredAt.desc">发生时间：新到旧</option><option value="occurredAt.asc">发生时间：旧到新</option><option value="createdAt.desc">创建时间：新到旧</option><option value="amount.desc">金额：高到低</option><option value="amount.asc">金额：低到高</option></select></div>
+			<div className="filter-actions"><button type="submit" className="primary-button">应用筛选</button><button type="button" className="secondary-button" onClick={() => { setFrom(''); setTo(''); setType(''); setCategoryId(''); setSubcategoryId(''); setSort('occurredAt.desc'); window.setTimeout(() => void loadEntries(), 0); }}>重置</button></div>
+		</form>
+		{items.length ? <div className="entry-list">{items.map((entry) => <article className={`entry-row ${entry.isReversal ? 'reversal' : ''}`} key={entry.id}>
+			<a className="entry-main entry-link" href={`/entries/${entry.id}`} onClick={(event) => { event.preventDefault(); navigate(`/entries/${entry.id}`); }}><strong>{entryTypeLabel(entry.type)}{entry.isReversal && ' · 冲正'}</strong><span className="muted">{displayEntryCategory(entry, categories)}</span><span className="muted">{new Date(entry.occurredAt).toLocaleString('zh-CN')}</span>{entry.isReversal && <span className="reversal-label">冲正记录</span>}</a>
 			<div className="entry-side"><strong className={entry.type === 'income' ? 'amount-income' : 'amount-expense'}>{entry.type === 'income' ? '+' : '-'}{entry.displayAmount}</strong>{entry.note && <span className="muted">{entry.note}</span>}</div>
-		</article>)}</div> : <div className="empty-state"><h2>还没有账目</h2><p className="muted">记录第一笔收入或普通支出。</p><button type="button" className="primary-button" onClick={() => navigate('/entries/new')}>新增账目</button></div>}
+		</article>)}</div> : <div className="empty-state"><h2>没有匹配的账目</h2><p className="muted">尝试调整筛选条件，或记录第一笔账目。</p><button type="button" className="primary-button" onClick={() => navigate('/entries/new')}>新增账目</button></div>}
+		{loadMoreError && <div className="pagination-feedback"><p className="error" role="alert">{loadMoreError}</p><button type="button" className="secondary-button" onClick={() => void loadMore()}>重试加载</button></div>}
+		{nextCursor && !loadMoreError && <button type="button" className="load-more" onClick={() => void loadMore()} disabled={loadingMore}>{loadingMore ? '加载中…' : '加载更多'}</button>}
+	</section>;
+}
+
+function EntryDetailsPage({ id }: { id: string }) {
+	const [entry, setEntry] = useState<Entry | null>(null);
+	const [relatedEntry, setRelatedEntry] = useState<Entry | null>(null);
+	const [categories, setCategories] = useState<CategoriesResponse | null>(null);
+	const [loading, setLoading] = useState(true);
+	const [busy, setBusy] = useState(false);
+	const [error, setError] = useState('');
+	const [message, setMessage] = useState('');
+
+	async function load() {
+		setLoading(true); setError(''); setRelatedEntry(null);
+		try {
+			const [detail, categoryData] = await Promise.all([
+				api<{ entry: Entry }>(`/entries/${encodeURIComponent(id)}`),
+				api<CategoriesResponse>('/categories'),
+			]);
+			setEntry(detail.entry);
+			setCategories(categoryData);
+			try {
+				const list = await api<EntryPage>('/entries?limit=100&sort=occurredAt.desc');
+				setRelatedEntry(detail.entry.reversalOf ? list.items.find((item) => item.id === detail.entry.reversalOf) ?? null : list.items.find((item) => item.reversalOf === detail.entry.id) ?? null);
+			} catch {
+				setError('关联账目加载失败，详情仍可查看');
+			}
+		} catch (caught) {
+			setError(caught instanceof Error ? caught.message : '详情加载失败');
+		} finally { setLoading(false); }
+	}
+
+	useEffect(() => { void load(); }, [id]);
+
+	async function reverse() {
+		if (!entry || entry.isReversal || entry.reversedAt) return;
+		if (!window.confirm('确认冲正这笔账目？系统会保留原记录，并新增一笔相反类型的冲正记录。')) return;
+		setBusy(true); setError(''); setMessage('');
+		try { await api(`/entries/${encodeURIComponent(entry.id)}`, { method: 'DELETE' }); setMessage('已完成冲正'); await load(); }
+		catch (caught) { setError(caught instanceof Error ? caught.message : '冲正失败'); }
+		finally { setBusy(false); }
+	}
+
+	if (loading) return <section className="empty-state"><p>正在加载账目详情…</p></section>;
+	if (error && !entry) return <section className="empty-state"><p className="error" role="alert">{error}</p><button type="button" onClick={() => void load()}>重试</button></section>;
+	if (!entry) return <section className="empty-state"><h2>找不到这笔账目</h2><button type="button" onClick={() => navigate('/entries')}>返回账目</button></section>;
+	const positive = entry.type === 'income';
+	return <section className="entry-detail-layout">
+		<div className="detail-toolbar"><button type="button" className="secondary-button" onClick={() => navigate('/entries')}>返回账目</button><span className={`detail-badge ${entry.isReversal ? 'reversal' : ''}`}>{entry.isReversal ? '冲正记录' : entry.reversedAt ? '已冲正原账目' : '原账目'}</span></div>
+		{(error || message) && <p className={error ? 'error' : 'success'} role="status">{error || message}</p>}
+		<div className="detail-panel"><div className="detail-amount"><span className="muted">{entryTypeLabel(entry.type)}</span><strong className={positive ? 'amount-income' : 'amount-expense'}>{positive ? '+' : '-'}{entry.displayAmount}</strong></div>
+			<dl className="detail-grid"><div><dt>发生时间</dt><dd>{new Date(entry.occurredAt).toLocaleString('zh-CN')}</dd></div><div><dt>粗分类</dt><dd>{displayEntryCategory(entry, categories)}</dd></div><div><dt>细分类</dt><dd>{entry.subcategoryId ? categories?.fineCategories.find((fine) => fine.id === entry.subcategoryId)?.name || `ID ${entry.subcategoryId}` : '未选择'}</dd></div><div><dt>备注</dt><dd>{entry.note || '无'}</dd></div><div><dt>记录 ID</dt><dd className="detail-id">{entry.id}</dd></div><div><dt>状态</dt><dd>{entry.isReversal ? '冲正记录' : entry.reversedAt ? '已冲正' : '有效'}</dd></div></dl>
+			{relatedEntry && <div className="relation-panel"><span className="muted">关联账目</span><a href={`/entries/${relatedEntry.id}`} onClick={(event) => { event.preventDefault(); navigate(`/entries/${relatedEntry.id}`); }}>{relatedEntry.isReversal ? '查看冲正记录' : '查看原账目'} · {relatedEntry.displayAmount}</a></div>}
+			{!entry.isReversal && !entry.reversedAt && <button type="button" className="danger-button" onClick={() => void reverse()} disabled={busy}>{busy ? '处理中…' : '冲正这笔账目'}</button>}
+		</div>
 	</section>;
 }
 
