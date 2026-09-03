@@ -140,6 +140,25 @@ describe('Hono worker', () => {
 		fetchMock.mockRestore();
 	});
 
+	it('requires a Turnstile token and rejects failed verification generically', async () => {
+		const missingToken = await request('/auth/login', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '10.0.0.20' },
+			body: JSON.stringify({ password: 'test-password' }),
+		});
+		expect(missingToken.status).toBe(400);
+
+		const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ success: false }), { status: 200 }));
+		const invalidToken = await request('/auth/login', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '10.0.0.21' },
+			body: JSON.stringify({ password: 'test-password', turnstileToken: 'invalid-token' }),
+		});
+		expect(invalidToken.status).toBe(401);
+		expect(await invalidToken.json()).toEqual({ error: { message: 'authentication failed' } });
+		fetchMock.mockRestore();
+	});
+
 	it('expires and logs out a browser session, and blocks cross-origin writes', async () => {
 		vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ success: true }), { status: 200 }));
 		const login = await request('/auth/login', {
@@ -187,6 +206,13 @@ describe('Hono worker', () => {
 		// Wait for all `Promise`s passed to `ctx.waitUntil()` to settle before running test assertions
 		await waitOnExecutionContext(ctx);
 		expect(await response.text()).toMatchInlineSnapshot(`"Hello World!"`);
+	});
+
+	it('keeps unknown API paths as JSON 404 responses', async () => {
+		const response = await request('/entries/unknown-api/path', { headers: { Authorization: 'Bearer test-key' } });
+		expect(response.status).toBe(404);
+		expect(response.headers.get('content-type')).toContain('application/json');
+		expect(await response.json()).toEqual({ error: { message: 'not found' } });
 	});
 
 	it('returns a JSON health response', async () => {

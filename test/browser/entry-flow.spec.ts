@@ -254,3 +254,70 @@ test.describe('账目列表与详情', () => {
 		await expect(page.getByRole('status')).toHaveText('这笔账目已完成冲正，不能重复操作');
 	});
 });
+
+test.describe('发布边界与设置', () => {
+	test('未认证访问受保护路由时回到登录页', async ({ page }) => {
+		await page.goto('/settings');
+		await expect(page).toHaveURL(/\/login$/);
+		await expect(page.getByRole('heading', { name: '欢迎回来' })).toBeVisible();
+	});
+
+	test('会话失效后回到登录页', async ({ page }) => {
+		await login(page);
+		await page.route('**/analytics/summary*', async (route) => {
+			await route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: { message: 'forbidden' } }) });
+		});
+		await page.reload();
+		await expect(page).toHaveURL(/\/login$/);
+	});
+
+	test('账目详情直达仍由 SPA 接管，API 请求保持 JSON', async ({ page }) => {
+		await login(page);
+		const api404 = await page.request.get('/entries/unknown-api/path');
+		expect(api404.status()).toBe(404);
+		expect(api404.headers()['content-type']).toContain('application/json');
+		await page.goto('/entries/direct-detail-route');
+		await expect(page).toHaveURL(/\/entries\/direct-detail-route$/);
+		await expect(page.getByRole('heading', { name: '账目详情' })).toBeVisible();
+		await expect(page.getByRole('alert')).toHaveText('entry not found');
+	});
+
+	test('设置页覆盖细类新增、改名、排序、停用和发薪日', async ({ page }) => {
+		await page.clock.install({ time: new Date('2026-09-02T00:00:00Z') });
+		await login(page);
+		await page.getByRole('link', { name: '设置' }).click();
+		await expect(page).toHaveURL(/\/settings$/);
+
+		const suffix = Date.now();
+		const firstName = `浏览器细类一-${suffix}`;
+		const secondName = `浏览器细类二-${suffix}`;
+		const renamedName = `浏览器细类改名-${suffix}`;
+		const create = async (name: string) => {
+			await page.getByLabel('名称').fill(name);
+			await page.getByLabel('所属粗类').selectOption('2');
+			await page.getByRole('button', { name: '新增细类' }).click();
+			await expect(page.getByText(name, { exact: true })).toBeVisible();
+		};
+		await create(firstName);
+		await create(secondName);
+
+		const secondRow = page.locator('.fine-row').filter({ hasText: secondName });
+		await secondRow.getByRole('button', { name: `${secondName} 上移` }).click();
+		await expect(page.locator('.fine-group').filter({ has: page.getByRole('heading', { name: '餐饮' }) }).locator('.fine-name').first()).toContainText(secondName);
+
+		page.once('dialog', (dialog) => dialog.accept(renamedName));
+		await secondRow.getByRole('button', { name: '改名' }).click();
+		await expect(page.getByText(renamedName, { exact: true })).toBeVisible();
+
+		const renamedRow = page.locator('.fine-row').filter({ hasText: renamedName });
+		page.once('dialog', (dialog) => dialog.accept());
+		await renamedRow.getByRole('button', { name: '停用' }).click();
+		await expect(renamedRow).toContainText('已停用');
+
+		await page.getByLabel('每月发薪日').fill('1');
+		await page.getByRole('button', { name: '保存' }).click();
+		await expect(page.getByText('发薪日已保存')).toBeVisible();
+		await page.getByRole('link', { name: '分析' }).click();
+		await expect(page.getByRole('heading', { name: '2026-09-01 至 2026-09-30' })).toBeVisible();
+	});
+});

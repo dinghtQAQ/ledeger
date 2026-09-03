@@ -270,6 +270,20 @@ function jsonError(c: LedgerContext, status: ErrorStatus, message: string): Resp
 	return c.json({ error: { message } }, status);
 }
 
+function acceptsHtml(c: LedgerContext) {
+	return c.req.header('Accept')?.includes('text/html') ?? false;
+}
+
+async function serveSpa(c: LedgerContext) {
+	if (!c.env.ASSETS) return null;
+	const response = await c.env.ASSETS.fetch(new Request(new URL('/', c.req.url), c.req.raw));
+	return response.status === 404 ? null : response;
+}
+
+function isSpaRoute(pathname: string) {
+	return pathname === '/analytics' || pathname === '/settings' || /^\/entries(?:\/[^/]+)?$/.test(pathname);
+}
+
 function registerOpenApi(route: unknown, handler: (c: LedgerContext) => unknown) {
 	const openapi = (app as unknown as { openapi: (route: unknown, handler: unknown) => unknown }).openapi;
 	return Reflect.apply(openapi, app, [route, handler]);
@@ -630,8 +644,8 @@ registerOpenApi(authLogoutRoute, async (c: LedgerContext) => {
 
 app.get('/', async (c) => {
 	if (c.env.ASSETS && c.req.header('Accept')?.includes('text/html')) {
-		const asset = await c.env.ASSETS.fetch(new Request(new URL('/index.html', c.req.url), c.req.raw));
-		if (asset.status !== 404 && (await asset.clone().text())) return asset;
+		const asset = await serveSpa(c);
+		if (asset) return asset;
 	}
 	return c.text('Hello World!');
 });
@@ -655,6 +669,10 @@ app.doc('/openapi.json', {
 app.get('/docs', swaggerUI({ url: '/openapi.json', persistAuthorization: true }));
 
 async function protectApi(c: LedgerContext, next: () => Promise<void>) {
+	if (c.req.method === 'GET' && acceptsHtml(c) && isSpaRoute(new URL(c.req.url).pathname)) {
+		const spa = await serveSpa(c);
+		if (spa) return spa as never;
+	}
 	const auth = await authenticate(c);
 	if (!auth.authenticated) return jsonError(c, 403, 'forbidden') as never;
 	const mutating = !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method);
@@ -670,6 +688,10 @@ app.use('/settings', protectApi);
 app.use('/analytics', protectApi);
 
 app.use('/entries', async (c, next) => {
+	if (c.req.method === 'GET' && acceptsHtml(c) && isSpaRoute(new URL(c.req.url).pathname)) {
+		const spa = await serveSpa(c);
+		if (spa) return spa as never;
+	}
 	const auth = await authenticate(c);
 	if (!auth.authenticated) return jsonError(c, 403, 'forbidden');
 	const mutating = !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method);
@@ -683,8 +705,8 @@ app.use('/entries', async (c, next) => {
 });
 
 app.get('/entries/new', async (c) => {
-	if (!c.env.ASSETS) return c.text('Not Found', 404);
-	return c.env.ASSETS.fetch(new Request(new URL('/index.html', c.req.url), c.req.raw));
+	const spa = await serveSpa(c);
+	return spa ?? c.text('Not Found', 404);
 });
 
 function toFineCategory(row: { id: number; name: string; coarse_category_id: number; sort_order: number; is_active: number }) {
@@ -983,6 +1005,10 @@ registerOpenApi(listEntriesRoute, async (c: LedgerContext) => {
 });
 
 registerOpenApi(entryByIdRoute, async (c: LedgerContext) => {
+	if (acceptsHtml(c)) {
+		const spa = await serveSpa(c);
+		if (spa) return spa;
+	}
 	const { id } = validated<{ id: string }>(c, 'param');
 	const row = await c.env.DB.prepare('SELECT * FROM entries WHERE id = ?').bind(id).first<EntryRow>();
 	if (!row) return jsonError(c, 404, 'entry not found');
@@ -1061,12 +1087,15 @@ registerOpenApi(payEntryRoute, async (c: LedgerContext) => {
 });
 
 app.notFound(async (c) => {
+	const pathname = new URL(c.req.url).pathname;
+	const apiPath = /^\/(?:auth|entries|categories|settings|analytics)(?:\/|$)/.test(pathname);
+	if (apiPath) return jsonError(c, 404, 'not found');
 	if (c.env.ASSETS) {
 		const assetResponse = await c.env.ASSETS.fetch(c.req.raw);
 		if (assetResponse.status !== 404) return assetResponse;
-		const pathname = new URL(c.req.url).pathname;
 		if (!pathname.includes('.')) {
-			return c.env.ASSETS.fetch(new Request(new URL('/index.html', c.req.url), c.req.raw));
+			const spa = await serveSpa(c);
+			if (spa) return spa;
 		}
 	}
 	return c.text('Not Found', 404);

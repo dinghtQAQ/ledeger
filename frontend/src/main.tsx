@@ -664,6 +664,9 @@ function Root() {
 		api<Session>('/auth/session').then(setSession).catch(() => setSession({ authenticated: false }));
 		return () => { window.removeEventListener('popstate', onPop); window.removeEventListener('session-expired', onExpired); };
 	}, []);
+	useEffect(() => {
+		if (session && !session.authenticated && path !== '/login') navigate('/login');
+	}, [session, path]);
 	if (!session) return <div className="loading">正在检查会话…</div>;
 	if (!session.authenticated) return <LoginPage onLogin={(next) => { setSession(next); navigate('/analytics'); }} />;
 	if (path === '/login') navigate('/analytics');

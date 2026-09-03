@@ -99,6 +99,15 @@ LEDGER_TIMEZONE=Asia/Shanghai
 
 生产环境请使用单独的未提交 Wrangler 配置文件（例如 `wrangler.production.jsonc`），在其中填写生产 D1 的 `database_id`，并通过 `--config wrangler.production.jsonc` 部署。不要把个人 D1 ID 或密钥写入公共配置。
 
+第二阶段生产发布检查：
+
+- 必需 Worker Secret：`LEDGER_PASSWORD`、`TURNSTILE_SECRET_KEY`；不要把密码或 Turnstile 私钥写入前端、`wrangler.jsonc` 或提交的变量文件。
+- 构建时配置 Turnstile 公钥 `VITE_TURNSTILE_SITE_KEY`（可公开，需与生产域名匹配）；`TURNSTILE_VERIFY_URL` 仅用于本地测试 stub，生产使用 Cloudflare 默认校验地址。
+- 必需非敏感变量：`LEDGER_TIMEZONE`（例如 `Asia/Shanghai`）；它决定工资周期和日期筛选的本地日历边界。
+- 生产 D1 先执行 `pnpm exec wrangler d1 migrations apply ledeger-db --remote --config wrangler.production.jsonc`，再运行 `pnpm run check`、`pnpm run test:browser` 和 `pnpm run deploy:dry-run -- --config wrangler.production.jsonc`。
+- 发布前可用 `pnpm run test:migrations` 在临时本地 D1 上完整执行全部 migration 两次，确认迁移可重复应用。
+- Worker 的 `assets.directory` 指向 `dist`；部署前运行 `pnpm run build`。未知 API 路径保持 JSON 404，非 API 的 SPA 路径由同一 Worker 回退到 `index.html`。
+
 首次创建 D1 数据库（只需执行一次）：
 
 ```bash

@@ -10,6 +10,7 @@
 		"start": "wrangler dev",
 		"test": "vitest run",
 		"test:browser": "playwright test",
+		"test:migrations": "node scripts/verify-migrations.mjs",
 		"test:watch": "vitest",
 		"typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.frontend.json && tsc --noEmit -p test/tsconfig.json",
 		"check": "pnpm run typecheck && pnpm run test",
