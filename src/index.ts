@@ -28,6 +28,7 @@ type LedgerEnv = Env & {
 	LEDGER_PASSWORD?: string;
 	TURNSTILE_SECRET_KEY?: string;
 	TURNSTILE_SECRET?: string;
+	TURNSTILE_VERIFY_URL?: string;
 	LEDGER_TIMEZONE?: string;
 	ASSETS?: { fetch: typeof fetch };
 };
@@ -226,7 +227,7 @@ async function verifyTurnstile(c: LedgerContext, token: string) {
 	const secret = c.env.TURNSTILE_SECRET_KEY || c.env.TURNSTILE_SECRET;
 	if (!secret || !token) return false;
 	try {
-		const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+		const response = await fetch(c.env.TURNSTILE_VERIFY_URL || 'https://challenges.cloudflare.com/turnstile/v0/siteverify', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
 			body: new URLSearchParams({ secret, response: token, remoteip: clientKey(c) }).toString(),
@@ -662,6 +663,11 @@ app.use('/entries', async (c, next) => {
 	await ensureCategoryTables(c.env.DB);
 	await next();
 	c.res = renewSessionCookie(c, c.res, auth);
+});
+
+app.get('/entries/new', async (c) => {
+	if (!c.env.ASSETS) return c.text('Not Found', 404);
+	return c.env.ASSETS.fetch(new Request(new URL('/index.html', c.req.url), c.req.raw));
 });
 
 function toFineCategory(row: { id: number; name: string; coarse_category_id: number; sort_order: number; is_active: number }) {
