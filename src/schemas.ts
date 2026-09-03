@@ -124,12 +124,14 @@ export const ledgerSettingsUpdateSchema = z.object({
 export const analyticsSummaryQuerySchema = z.object({
 	from: z.string().refine(isCalendarDateString, 'must be a valid calendar date'),
 	to: z.string().refine(isCalendarDateString, 'must be a valid calendar date'),
-	level: z.literal('coarse').default('coarse'),
+	level: z.enum(['coarse', 'fine']).default('coarse'),
 });
 
 export const analyticsItemSchema = z.object({
 	id: z.number().int().positive().nullable(),
 	name: z.string(),
+	parentId: z.number().int().positive().optional(),
+	parentName: z.string().optional(),
 	amount: z.string(),
 	displayAmount: z.string(),
 	count: z.number().int().nonnegative(),

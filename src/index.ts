@@ -90,7 +90,7 @@ type ListEntriesQuery = {
 	sort: Sort;
 };
 
-type AnalyticsSummaryQuery = { from: string; to: string; level: 'coarse' };
+type AnalyticsSummaryQuery = { from: string; to: string; level: 'coarse' | 'fine' };
 
 const sortMap = {
 	'occurredAt.desc': 'occurred_at DESC, id DESC',
@@ -777,23 +777,49 @@ registerOpenApi(analyticsSummaryRoute, async (c: LedgerContext) => {
 		}>();
 	const coarseRows = await c.env.DB.prepare('SELECT id, name FROM coarse_categories ORDER BY id').all<{ id: number; name: string }>();
 	const coarseNames = new Map(coarseRows.results.map((row) => [row.id, row.name]));
+	const fineRows = await c.env.DB.prepare('SELECT id, name, coarse_category_id FROM fine_categories ORDER BY coarse_category_id, sort_order, id').all<{
+		id: number; name: string; coarse_category_id: number;
+	}>();
+	const fineById = new Map(fineRows.results.map((row) => [row.id, row]));
 	const sum = (items: typeof periodRows.results, type: 'income' | 'expense') => items.filter((row) => row.type === type).reduce((total, row) => total + BigInt(row.amount_units), 0n);
 	const periodIncomeUnits = sum(periodRows.results, 'income');
 	const periodExpenseUnits = sum(periodRows.results, 'expense');
 	const balanceUnits = rows.results.reduce((total, row) => total + (row.type === 'income' ? 1n : -1n) * BigInt(row.amount_units), 0n);
-	const grouped = new Map<string, { id: number | null; name: string; units: bigint; count: number }>();
-	for (const row of coarseRows.results) grouped.set(`coarse:${row.id}`, { id: row.id, name: row.name, units: 0n, count: 0 });
+	const grouped = new Map<string, { id: number | null; name: string; parentId?: number; parentName?: string; units: bigint; count: number }>();
+	if (query.level === 'coarse') {
+		for (const row of coarseRows.results) grouped.set(`coarse:${row.id}`, { id: row.id, name: row.name, units: 0n, count: 0 });
+	} else {
+		for (const row of fineRows.results) {
+			grouped.set(`fine:${row.id}`, {
+				id: row.id,
+				name: row.name,
+				parentId: row.coarse_category_id,
+				parentName: coarseNames.get(row.coarse_category_id) ?? '未分类',
+				units: 0n,
+				count: 0,
+			});
+		}
+	}
 	for (const row of periodRows.results) {
 		if (row.type !== 'expense') continue;
 		let key: string;
 		let id: number | null;
 		let name: string;
+		let parentId: number | undefined;
+		let parentName: string | undefined;
 		if (query.level === 'coarse' && row.category_id !== null && coarseNames.has(row.category_id)) {
 			key = `coarse:${row.category_id}`; id = row.category_id; name = coarseNames.get(row.category_id)!;
+		} else if (query.level === 'fine' && row.subcategory_id !== null && fineById.has(row.subcategory_id)) {
+			const fine = fineById.get(row.subcategory_id)!;
+			key = `fine:${fine.id}`;
+			id = fine.id;
+			name = fine.name;
+			parentId = fine.coarse_category_id;
+			parentName = coarseNames.get(fine.coarse_category_id) ?? '未分类';
 		} else {
 			key = 'uncategorized'; id = null; name = '未分类';
 		}
-		const current = grouped.get(key) ?? { id, name, units: 0n, count: 0 };
+		const current = grouped.get(key) ?? { id, name, parentId, parentName, units: 0n, count: 0 };
 		current.units += BigInt(row.amount_units); current.count += 1; grouped.set(key, current);
 	}
 	return c.json({
@@ -805,7 +831,15 @@ registerOpenApi(analyticsSummaryRoute, async (c: LedgerContext) => {
 		currentBalance: unitsToAmount(balanceUnits),
 		items: [...grouped.values()].map((item) => {
 			const amount = unitsToAmount(item.units);
-			return { id: item.id, name: item.name, amount, displayAmount: item.units === 0n ? '0.000' : displayAmount(amount), count: item.count };
+			return {
+				id: item.id,
+				name: item.name,
+				...(item.parentId === undefined ? {} : { parentId: item.parentId }),
+				...(item.parentName === undefined ? {} : { parentName: item.parentName }),
+				amount,
+				displayAmount: item.units === 0n ? '0.000' : displayAmount(amount),
+				count: item.count,
+			};
 		}),
 	}, 200);
 });

@@ -475,10 +475,16 @@ describe('Hono worker', () => {
 	});
 
 	it('summarizes the selected period, keeps balance global, and excludes reversals', async () => {
+		const fineResponse = await request('/categories/fine', {
+			method: 'POST',
+			headers: { Authorization: 'Bearer test-key', Origin: 'https://example.com', 'Content-Type': 'application/json' },
+			body: JSON.stringify({ name: '早餐', coarseCategoryId: 2 }),
+		});
+		const fine = await fineResponse.json<any>();
 		await createEntry({ type: 'income', amount: '100', occurredAt: '2026-09-01T08:00:00+08:00', category: null, categoryId: null }, 'analytics-income');
 		await createEntry({ type: 'income', amount: '1', occurredAt: '2026-08-31T16:00:00Z', category: null, categoryId: null }, 'analytics-start-boundary');
 		await createEntry({ type: 'income', amount: '2', occurredAt: '2026-09-01T16:00:00Z', category: null, categoryId: null }, 'analytics-end-boundary');
-		await createEntry({ type: 'expense', amount: '12', occurredAt: '2026-09-01T09:00:00+08:00', category: null, categoryId: 2 }, 'analytics-expense');
+		await createEntry({ type: 'expense', amount: '12', occurredAt: '2026-09-01T09:00:00+08:00', category: null, categoryId: 2, subcategoryId: fine.id }, 'analytics-expense');
 		await createEntry({ type: 'expense', amount: '4', occurredAt: '2026-09-01T11:00:00+08:00', category: 'legacy label', categoryId: null }, 'analytics-uncategorized');
 		await createEntry({ type: 'expense', amount: '5', occurredAt: '2026-09-02T09:00:00+08:00', category: null, categoryId: 1 }, 'analytics-outside');
 		await insertLegacyDueExpense('analytics-due-expense');
@@ -495,6 +501,12 @@ describe('Hono worker', () => {
 		expect(body.items.find((item: any) => item.id === 3)).toMatchObject({ amount: '0', count: 0 });
 		expect(body.items.find((item: any) => item.id === null)).toMatchObject({ name: '未分类', amount: '4', count: 1 });
 		expect(body.items.some((item: any) => item.amount === '7')).toBe(false);
+
+		const fineResponseSummary = await request('/analytics/summary?from=2026-09-01&to=2026-09-02&level=fine', { headers: { Authorization: 'Bearer test-key' } });
+		expect(fineResponseSummary.status).toBe(200);
+		const fineBody = await fineResponseSummary.json<any>();
+		expect(fineBody.items.find((item: any) => item.id === fine.id)).toMatchObject({ name: '早餐', parentId: 2, parentName: '餐饮', amount: '12', count: 1 });
+		expect(fineBody.items.find((item: any) => item.id === null)).toMatchObject({ name: '未分类', amount: '4', count: 1 });
 	});
 
 	it('rejects an empty analysis interval', async () => {

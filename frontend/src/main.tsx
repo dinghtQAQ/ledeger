@@ -7,7 +7,7 @@ type CoarseCategory = { id: number; name: string };
 type FineCategory = { id: number; name: string; coarseCategoryId: number; sortOrder: number; isActive: boolean };
 type CategoriesResponse = { coarseCategories: CoarseCategory[]; fineCategories: FineCategory[] };
 type LedgerSettings = { paydayDay: number; timezone: string };
-type AnalyticsItem = { id: number | null; name: string; amount: string; displayAmount: string; count: number };
+type AnalyticsItem = { id: number | null; name: string; parentId?: number; parentName?: string; amount: string; displayAmount: string; count: number };
 type AnalyticsSummary = { from: string; to: string; periodIncome: string; periodExpense: string; periodNet: string; currentBalance: string; items: AnalyticsItem[] };
 type EntryType = 'income' | 'expense' | 'due_expense';
 type Entry = {
@@ -87,6 +87,18 @@ function shiftCalendarDate(value: string, days: number) {
 	const date = new Date(`${value}T00:00:00Z`);
 	date.setUTCDate(date.getUTCDate() + days);
 	return date.toISOString().slice(0, 10);
+}
+
+function shiftCalendarMonth(value: string, months: number) {
+	const [year, month, day] = value.split('-').map(Number);
+	const date = new Date(Date.UTC(year, month - 1 + months, 1));
+	const lastDay = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)).getUTCDate();
+	date.setUTCDate(Math.min(day, lastDay));
+	return date.toISOString().slice(0, 10);
+}
+
+function shiftWageCycle(range: { start: string; end: string }, months: number) {
+	return { start: shiftCalendarMonth(range.start, months), end: shiftCalendarMonth(range.end, months) };
 }
 
 function currentWageCycle(paydayDay: number, timezone: string) {
@@ -576,22 +588,68 @@ function AnalyticsPreview() {
 	const [settings, setSettings] = useState<LedgerSettings | null>(null);
 	const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
 	const [range, setRange] = useState<{ start: string; end: string } | null>(null);
+	const [level, setLevel] = useState<'coarse' | 'fine'>('coarse');
+	const [cycleOffset, setCycleOffset] = useState(0);
+	const [rangeMode, setRangeMode] = useState<'cycle' | 'custom'>('cycle');
+	const [customStart, setCustomStart] = useState('');
+	const [customEnd, setCustomEnd] = useState('');
+	const [rangeError, setRangeError] = useState('');
 	const [error, setError] = useState('');
 	useEffect(() => {
 		api<LedgerSettings>('/settings/ledger').then((nextSettings) => {
 			setSettings(nextSettings);
-			const nextRange = currentWageCycle(nextSettings.paydayDay, nextSettings.timezone);
-			setRange(nextRange);
-			return api<AnalyticsSummary>(`/analytics/summary?from=${nextRange.start}&to=${nextRange.end}&level=coarse`);
-		}).then(setSummary).catch((caught) => setError(caught instanceof Error ? caught.message : '分析加载失败'));
+			setRange(currentWageCycle(nextSettings.paydayDay, nextSettings.timezone));
+		}).catch((caught) => setError(caught instanceof Error ? caught.message : '分析加载失败'));
 	}, []);
+	useEffect(() => {
+		if (!range) return;
+		setSummary(null);
+		setError('');
+		api<AnalyticsSummary>(`/analytics/summary?from=${range.start}&to=${range.end}&level=${level}`)
+			.then(setSummary)
+			.catch((caught) => setError(caught instanceof Error ? caught.message : '分析加载失败'));
+	}, [range, level]);
+
+	function selectCycle(offset: number) {
+		if (!settings) return;
+		const current = currentWageCycle(settings.paydayDay, settings.timezone);
+		setCycleOffset(offset);
+		setRangeMode('cycle');
+		setRange(shiftWageCycle(current, offset));
+		setRangeError('');
+	}
+
+	function applyCustomRange(event: React.FormEvent<HTMLFormElement>) {
+		event.preventDefault();
+		if (!customStart || !customEnd) {
+			setRangeError('请选择开始和结束日期');
+			return;
+		}
+		if (customStart > customEnd) {
+			setRangeError('开始日期不能晚于结束日期');
+			return;
+		}
+		setRangeError('');
+		setCycleOffset(0);
+		setRangeMode('custom');
+		setRange({ start: customStart, end: nextCalendarDate(customEnd) });
+	}
+
 	if (error) return <section className="empty-state"><p className="error" role="alert">{error}</p><button type="button" onClick={() => window.location.reload()}>重试</button></section>;
 	if (!settings || !range || !summary) return <section className="empty-state"><p>正在加载分析…</p></section>;
 	const maxAmount = Math.max(...summary.items.map((item) => Number(item.amount)), 1);
+	const displayedEnd = shiftCalendarDate(range.end, -1);
+	const chartName = level === 'coarse' ? '粗分类支出' : '细分类支出';
 	return <section className="overview">
-		<div className="analysis-range"><div><p className="eyebrow">CURRENT WAGE CYCLE</p><h2>{range.start} 至 {shiftCalendarDate(range.end, -1)}</h2></div><span className="muted">时区：{settings.timezone}</span></div>
+		<div className="analysis-range"><div><p className="eyebrow">{rangeMode === 'custom' ? 'CUSTOM DATE RANGE' : cycleOffset === 0 ? 'CURRENT WAGE CYCLE' : cycleOffset < 0 ? 'PREVIOUS WAGE CYCLE' : 'NEXT WAGE CYCLE'}</p><h2>{range.start} 至 {displayedEnd}</h2></div><span className="muted">时区：{settings.timezone}</span></div>
+		<div className="analysis-controls">
+			<div className="cycle-controls" aria-label="工资周期导航"><button type="button" className="secondary-button" onClick={() => selectCycle(cycleOffset - 1)}>上一周期</button><button type="button" className="secondary-button" onClick={() => selectCycle(0)}>当前周期</button><button type="button" className="secondary-button" onClick={() => selectCycle(cycleOffset + 1)}>下一周期</button></div>
+			<div className="level-toggle" role="group" aria-label="图表层级"><button type="button" className={level === 'coarse' ? 'selected' : ''} aria-pressed={level === 'coarse'} onClick={() => setLevel('coarse')}>粗类</button><button type="button" className={level === 'fine' ? 'selected' : ''} aria-pressed={level === 'fine'} onClick={() => setLevel('fine')}>细类</button></div>
+		</div>
+		<form className="analysis-custom-range" onSubmit={applyCustomRange}><div><label htmlFor="analytics-from">开始日期</label><input id="analytics-from" type="date" value={customStart} onChange={(event) => setCustomStart(event.target.value)} /></div><div><label htmlFor="analytics-to">结束日期</label><input id="analytics-to" type="date" value={customEnd} onChange={(event) => setCustomEnd(event.target.value)} /></div><button type="submit" className="secondary-button">应用范围</button></form>
+		{rangeError && <p className="error" role="alert">{rangeError}</p>}
 		<div className="summary-grid"><article><span>周期收入</span><strong className="amount-income">+{summary.periodIncome}</strong></article><article><span>普通支出</span><strong className="amount-expense">-{summary.periodExpense}</strong></article><article><span>周期净额</span><strong className={summary.periodNet.startsWith('-') ? 'amount-expense' : 'amount-income'}>{summary.periodNet}</strong></article><article><span>当前余额</span><strong>{summary.currentBalance}</strong></article></div>
-		<div className="chart-panel"><div className="section-heading"><div><p className="eyebrow">SPENDING MAP</p><h2>粗分类支出</h2></div><span className="muted">金额 / 笔数</span></div><div className="bar-chart" role="img" aria-label="粗分类支出柱状图">{summary.items.map((item) => <div className="bar-item" key={item.id ?? 'uncategorized'}><div className="bar-track"><div className="bar-fill" style={{ height: `${Math.max(0, Number(item.amount) / maxAmount * 100)}%` }} title={`${item.name}：${item.displayAmount}，${item.count} 笔`} /></div><strong>{item.name}</strong><span className="muted">{item.displayAmount} · {item.count} 笔</span></div>)}</div></div>
+		<div className="chart-panel"><div className="section-heading"><div><p className="eyebrow">SPENDING MAP</p><h2>{chartName}</h2></div><span className="muted">金额 / 笔数</span></div><div className={`bar-chart ${level === 'fine' ? 'fine-chart' : ''}`} role="img" aria-label={`${chartName}柱状图`}>{summary.items.map((item) => <div className="bar-item" key={item.id ?? 'uncategorized'}><div className="bar-track"><div className="bar-fill" style={{ height: `${Math.max(0, Number(item.amount) / maxAmount * 100)}%` }} title={`${item.name}：${item.displayAmount}，${item.count} 笔`} /></div><strong>{item.name}</strong>{level === 'fine' && item.parentName && <span className="muted">{item.parentName}</span>}<span className="muted">{item.displayAmount} · {item.count} 笔</span></div>)}</div></div>
 	</section>;
 }
 

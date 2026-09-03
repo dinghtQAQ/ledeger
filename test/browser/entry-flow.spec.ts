@@ -95,6 +95,40 @@ test.describe('新增收入与普通支出', () => {
 	});
 });
 
+test.describe('分析层级与范围导航', () => {
+	test('支持粗细类切换、工资周期导航和包含结束日的自定义范围', async ({ page }) => {
+		await page.clock.install({ time: new Date('2026-09-02T00:00:00Z') });
+		let settingsWrites = 0;
+		page.on('request', (request) => {
+			if (request.url().includes('/settings/ledger') && request.method() === 'PUT') settingsWrites += 1;
+		});
+		await login(page);
+		await expect(page.getByRole('heading', { name: '2026-08-20 至 2026-09-19' })).toBeVisible();
+
+		const nextCycleRequest = page.waitForRequest((request) => request.url().includes('/analytics/summary') && new URL(request.url()).searchParams.get('from') === '2026-09-20');
+		await page.getByRole('button', { name: '下一周期' }).click();
+		expect(new URL((await nextCycleRequest).url()).searchParams.get('to')).toBe('2026-10-20');
+		await expect(page.getByRole('heading', { name: '2026-09-20 至 2026-10-19' })).toBeVisible();
+		await page.getByRole('button', { name: '上一周期' }).click();
+		await expect(page.getByRole('heading', { name: '2026-08-20 至 2026-09-19' })).toBeVisible();
+
+		await page.getByLabel('开始日期').fill('2026-09-01');
+		await page.getByLabel('结束日期').fill('2026-09-02');
+		const customRangeRequest = page.waitForRequest((request) => request.url().includes('/analytics/summary') && new URL(request.url()).searchParams.get('from') === '2026-09-01');
+		await page.getByRole('button', { name: '应用范围' }).click();
+		expect(new URL((await customRangeRequest).url()).searchParams.get('to')).toBe('2026-09-03');
+		await expect(page.getByRole('heading', { name: '2026-09-01 至 2026-09-02' })).toBeVisible();
+
+		const fineRangeRequest = page.waitForRequest((request) => request.url().includes('/analytics/summary') && new URL(request.url()).searchParams.get('level') === 'fine');
+		await page.getByRole('button', { name: '细类' }).click();
+		expect(new URL((await fineRangeRequest).url()).searchParams.get('from')).toBe('2026-09-01');
+		await expect(page.getByRole('heading', { name: '细分类支出' })).toBeVisible();
+		await expect(page.getByRole('img', { name: '细分类支出柱状图' })).toBeVisible();
+		await expect(page.getByRole('button', { name: '细类' })).toHaveAttribute('aria-pressed', 'true');
+		expect(settingsWrites).toBe(0);
+	});
+});
+
 test.describe('账目列表与详情', () => {
 	test('支持游标加载更多并跳转到账目详情', async ({ page }) => {
 		const first = {
