@@ -7,6 +7,8 @@ type CoarseCategory = { id: number; name: string };
 type FineCategory = { id: number; name: string; coarseCategoryId: number; sortOrder: number; isActive: boolean };
 type CategoriesResponse = { coarseCategories: CoarseCategory[]; fineCategories: FineCategory[] };
 type LedgerSettings = { paydayDay: number; timezone: string };
+type AnalyticsItem = { id: number | null; name: string; amount: string; displayAmount: string; count: number };
+type AnalyticsSummary = { from: string; to: string; periodIncome: string; periodExpense: string; periodNet: string; currentBalance: string; items: AnalyticsItem[] };
 type EntryType = 'income' | 'expense' | 'due_expense';
 type Entry = {
 	id: string;
@@ -73,6 +75,35 @@ function nextCalendarDate(value: string) {
 	const date = new Date(`${value}T00:00:00`);
 	date.setDate(date.getDate() + 1);
 	return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function localDateInTimezone(timezone: string, date = new Date()) {
+	const parts = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date);
+	const values = Object.fromEntries(parts.filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
+	return `${values.year}-${values.month}-${values.day}`;
+}
+
+function shiftCalendarDate(value: string, days: number) {
+	const date = new Date(`${value}T00:00:00Z`);
+	date.setUTCDate(date.getUTCDate() + days);
+	return date.toISOString().slice(0, 10);
+}
+
+function currentWageCycle(paydayDay: number, timezone: string) {
+	const today = localDateInTimezone(timezone);
+	const [year, month, day] = today.split('-').map(Number);
+	let startYear = year;
+	let startMonth = month;
+	if (day < paydayDay) {
+		startMonth -= 1;
+		if (startMonth === 0) { startMonth = 12; startYear -= 1; }
+	}
+	const start = `${startYear}-${String(startMonth).padStart(2, '0')}-${String(paydayDay).padStart(2, '0')}`;
+	let endYear = startYear;
+	let endMonth = startMonth + 1;
+	if (endMonth === 13) { endMonth = 1; endYear += 1; }
+	const end = `${endYear}-${String(endMonth).padStart(2, '0')}-${String(paydayDay).padStart(2, '0')}`;
+	return { start, end };
 }
 
 function entryTypeLabel(type: EntryType) {
@@ -542,9 +573,26 @@ function SettingsPage() {
 }
 
 function AnalyticsPreview() {
-	const [health, setHealth] = useState<'loading' | 'ready' | 'error'>('loading');
-	useEffect(() => { api<{ status: string }>('/health').then(() => setHealth('ready')).catch(() => setHealth('error')); }, []);
-	return <section className="overview"><div className="summary-grid"><article><span>周期收入</span><strong>—</strong></article><article><span>普通支出</span><strong>—</strong></article><article><span>周期净额</span><strong>—</strong></article><article><span>当前余额</span><strong>—</strong></article></div><div className="chart-placeholder"><div><p className="eyebrow">SPENDING MAP</p><h2>支出分类</h2><p className="muted">分析数据将在账目录入后显示。</p></div><span className={`status-chip ${health}`}>{health === 'ready' ? 'API 已连接' : health === 'error' ? 'API 未连接' : '连接中'}</span></div></section>;
+	const [settings, setSettings] = useState<LedgerSettings | null>(null);
+	const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
+	const [range, setRange] = useState<{ start: string; end: string } | null>(null);
+	const [error, setError] = useState('');
+	useEffect(() => {
+		api<LedgerSettings>('/settings/ledger').then((nextSettings) => {
+			setSettings(nextSettings);
+			const nextRange = currentWageCycle(nextSettings.paydayDay, nextSettings.timezone);
+			setRange(nextRange);
+			return api<AnalyticsSummary>(`/analytics/summary?from=${nextRange.start}&to=${nextRange.end}&level=coarse`);
+		}).then(setSummary).catch((caught) => setError(caught instanceof Error ? caught.message : '分析加载失败'));
+	}, []);
+	if (error) return <section className="empty-state"><p className="error" role="alert">{error}</p><button type="button" onClick={() => window.location.reload()}>重试</button></section>;
+	if (!settings || !range || !summary) return <section className="empty-state"><p>正在加载分析…</p></section>;
+	const maxAmount = Math.max(...summary.items.map((item) => Number(item.amount)), 1);
+	return <section className="overview">
+		<div className="analysis-range"><div><p className="eyebrow">CURRENT WAGE CYCLE</p><h2>{range.start} 至 {shiftCalendarDate(range.end, -1)}</h2></div><span className="muted">时区：{settings.timezone}</span></div>
+		<div className="summary-grid"><article><span>周期收入</span><strong className="amount-income">+{summary.periodIncome}</strong></article><article><span>普通支出</span><strong className="amount-expense">-{summary.periodExpense}</strong></article><article><span>周期净额</span><strong className={summary.periodNet.startsWith('-') ? 'amount-expense' : 'amount-income'}>{summary.periodNet}</strong></article><article><span>当前余额</span><strong>{summary.currentBalance}</strong></article></div>
+		<div className="chart-panel"><div className="section-heading"><div><p className="eyebrow">SPENDING MAP</p><h2>粗分类支出</h2></div><span className="muted">金额 / 笔数</span></div><div className="bar-chart" role="img" aria-label="粗分类支出柱状图">{summary.items.map((item) => <div className="bar-item" key={item.id ?? 'uncategorized'}><div className="bar-track"><div className="bar-fill" style={{ height: `${Math.max(0, Number(item.amount) / maxAmount * 100)}%` }} title={`${item.name}：${item.displayAmount}，${item.count} 笔`} /></div><strong>{item.name}</strong><span className="muted">{item.displayAmount} · {item.count} 笔</span></div>)}</div></div>
+	</section>;
 }
 
 function Root() {

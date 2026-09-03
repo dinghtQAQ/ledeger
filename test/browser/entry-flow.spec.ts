@@ -19,6 +19,18 @@ async function openNewEntry(page: import('@playwright/test').Page) {
 }
 
 test.describe('新增收入与普通支出', () => {
+	test('登录后默认进入分析并显示周期摘要与粗类图表', async ({ page }) => {
+		await page.clock.install({ time: new Date('2026-09-02T00:00:00Z') });
+		await login(page);
+		await expect(page.getByRole('heading', { name: '分析' })).toBeVisible();
+		await expect(page.getByRole('heading', { name: '2026-08-20 至 2026-09-19' })).toBeVisible();
+		await expect(page.getByText('周期收入')).toBeVisible();
+		await expect(page.getByText('普通支出')).toBeVisible();
+		await expect(page.getByRole('img', { name: '粗分类支出柱状图' })).toBeVisible();
+		await expect(page.getByText('住房')).toBeVisible();
+		await expect(page.getByText('餐饮')).toBeVisible();
+	});
+
 	test('创建普通支出后在账目列表可见', async ({ page }) => {
 		await login(page);
 		await openNewEntry(page);

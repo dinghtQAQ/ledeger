@@ -17,6 +17,8 @@ import {
 	fineCategorySchema,
 	ledgerSettingsSchema,
 	ledgerSettingsUpdateSchema,
+	analyticsSummaryQuerySchema,
+	analyticsSummarySchema,
 	idParamSchema,
 	listQuerySchema,
 	reversalResponseSchema,
@@ -87,6 +89,8 @@ type ListEntriesQuery = {
 	subcategoryId?: number;
 	sort: Sort;
 };
+
+type AnalyticsSummaryQuery = { from: string; to: string; level: 'coarse' };
 
 const sortMap = {
 	'occurredAt.desc': 'occurred_at DESC, id DESC',
@@ -552,6 +556,18 @@ const ledgerSettingsPutRoute = createRoute({
 	},
 });
 
+const analyticsSummaryRoute = createRoute({
+	method: 'get',
+	path: '/analytics/summary',
+	security: [{ bearerAuth: [] }],
+	request: { query: analyticsSummaryQuerySchema },
+	responses: {
+		200: { description: 'Analytics summary', content: { 'application/json': { schema: analyticsSummarySchema } } },
+		400: errorResponse,
+		403: errorResponse,
+	},
+});
+
 registerOpenApi(healthRoute, (c: LedgerContext) => c.json({ status: 'ok' }, 200));
 
 registerOpenApi(healthDbRoute, async (c: LedgerContext) => {
@@ -651,6 +667,7 @@ async function protectApi(c: LedgerContext, next: () => Promise<void>) {
 
 app.use('/categories', protectApi);
 app.use('/settings', protectApi);
+app.use('/analytics', protectApi);
 
 app.use('/entries', async (c, next) => {
 	const auth = await authenticate(c);
@@ -742,6 +759,55 @@ registerOpenApi(ledgerSettingsPutRoute, async (c: LedgerContext) => {
 	await c.env.DB.prepare('INSERT INTO ledger_settings (id, payday_day, updated_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET payday_day = excluded.payday_day, updated_at = excluded.updated_at')
 		.bind(paydayDay, now()).run();
 	return c.json({ paydayDay, timezone: c.env.LEDGER_TIMEZONE || 'Asia/Shanghai' }, 200);
+});
+
+registerOpenApi(analyticsSummaryRoute, async (c: LedgerContext) => {
+	const query = validated<AnalyticsSummaryQuery>(c, 'query');
+	if (query.from >= query.to) return jsonError(c, 400, 'from must be before to');
+	const timezone = c.env.LEDGER_TIMEZONE || 'Asia/Shanghai';
+	const fromUtc = localDateToUtc(query.from, timezone);
+	const toUtc = localDateToUtc(query.to, timezone);
+	const validWhere = "type IN ('income', 'expense') AND is_reversal = 0 AND reversal_of IS NULL AND reversed_at IS NULL";
+	const rows = await c.env.DB.prepare(`SELECT type, amount_units, category_id, subcategory_id FROM entries WHERE ${validWhere}`).all<{
+		type: 'income' | 'expense'; amount_units: string; category_id: number | null; subcategory_id: number | null;
+	}>();
+	const periodRows = await c.env.DB.prepare(`SELECT type, amount_units, category_id, subcategory_id FROM entries WHERE ${validWhere} AND occurred_at >= ? AND occurred_at < ?`)
+		.bind(fromUtc, toUtc).all<{
+			type: 'income' | 'expense'; amount_units: string; category_id: number | null; subcategory_id: number | null;
+		}>();
+	const coarseRows = await c.env.DB.prepare('SELECT id, name FROM coarse_categories ORDER BY id').all<{ id: number; name: string }>();
+	const coarseNames = new Map(coarseRows.results.map((row) => [row.id, row.name]));
+	const sum = (items: typeof periodRows.results, type: 'income' | 'expense') => items.filter((row) => row.type === type).reduce((total, row) => total + BigInt(row.amount_units), 0n);
+	const periodIncomeUnits = sum(periodRows.results, 'income');
+	const periodExpenseUnits = sum(periodRows.results, 'expense');
+	const balanceUnits = rows.results.reduce((total, row) => total + (row.type === 'income' ? 1n : -1n) * BigInt(row.amount_units), 0n);
+	const grouped = new Map<string, { id: number | null; name: string; units: bigint; count: number }>();
+	for (const row of coarseRows.results) grouped.set(`coarse:${row.id}`, { id: row.id, name: row.name, units: 0n, count: 0 });
+	for (const row of periodRows.results) {
+		if (row.type !== 'expense') continue;
+		let key: string;
+		let id: number | null;
+		let name: string;
+		if (query.level === 'coarse' && row.category_id !== null && coarseNames.has(row.category_id)) {
+			key = `coarse:${row.category_id}`; id = row.category_id; name = coarseNames.get(row.category_id)!;
+		} else {
+			key = 'uncategorized'; id = null; name = '未分类';
+		}
+		const current = grouped.get(key) ?? { id, name, units: 0n, count: 0 };
+		current.units += BigInt(row.amount_units); current.count += 1; grouped.set(key, current);
+	}
+	return c.json({
+		from: query.from,
+		to: query.to,
+		periodIncome: unitsToAmount(periodIncomeUnits),
+		periodExpense: unitsToAmount(periodExpenseUnits),
+		periodNet: unitsToAmount(periodIncomeUnits - periodExpenseUnits),
+		currentBalance: unitsToAmount(balanceUnits),
+		items: [...grouped.values()].map((item) => {
+			const amount = unitsToAmount(item.units);
+			return { id: item.id, name: item.name, amount, displayAmount: item.units === 0n ? '0.000' : displayAmount(amount), count: item.count };
+		}),
+	}, 200);
 });
 
 registerOpenApi(createEntryRoute, async (c: LedgerContext) => {

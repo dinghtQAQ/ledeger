@@ -120,3 +120,27 @@ export const ledgerSettingsUpdateSchema = z.object({
 	payday: z.coerce.number().int().min(1).max(28).optional(),
 })
 	.refine((value) => value.paydayDay !== undefined || value.paydayAnchor !== undefined || value.payday !== undefined, 'paydayDay is required');
+
+export const analyticsSummaryQuerySchema = z.object({
+	from: z.string().refine(isCalendarDateString, 'must be a valid calendar date'),
+	to: z.string().refine(isCalendarDateString, 'must be a valid calendar date'),
+	level: z.literal('coarse').default('coarse'),
+});
+
+export const analyticsItemSchema = z.object({
+	id: z.number().int().positive().nullable(),
+	name: z.string(),
+	amount: z.string(),
+	displayAmount: z.string(),
+	count: z.number().int().nonnegative(),
+});
+
+export const analyticsSummarySchema = z.object({
+	from: z.string(),
+	to: z.string(),
+	periodIncome: z.string(),
+	periodExpense: z.string(),
+	periodNet: z.string(),
+	currentBalance: z.string(),
+	items: z.array(analyticsItemSchema),
+}).openapi('AnalyticsSummary');

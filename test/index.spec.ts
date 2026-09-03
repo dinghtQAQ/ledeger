@@ -473,4 +473,32 @@ describe('Hono worker', () => {
 		const updated = await request('/settings/ledger', { method: 'PUT', headers: { Authorization: 'Bearer test-key', Origin: 'https://example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ paydayDay: 1 }) });
 		expect(await updated.json<any>()).toMatchObject({ paydayDay: 1, timezone: 'Asia/Shanghai' });
 	});
+
+	it('summarizes the selected period, keeps balance global, and excludes reversals', async () => {
+		await createEntry({ type: 'income', amount: '100', occurredAt: '2026-09-01T08:00:00+08:00', category: null, categoryId: null }, 'analytics-income');
+		await createEntry({ type: 'income', amount: '1', occurredAt: '2026-08-31T16:00:00Z', category: null, categoryId: null }, 'analytics-start-boundary');
+		await createEntry({ type: 'income', amount: '2', occurredAt: '2026-09-01T16:00:00Z', category: null, categoryId: null }, 'analytics-end-boundary');
+		await createEntry({ type: 'expense', amount: '12', occurredAt: '2026-09-01T09:00:00+08:00', category: null, categoryId: 2 }, 'analytics-expense');
+		await createEntry({ type: 'expense', amount: '4', occurredAt: '2026-09-01T11:00:00+08:00', category: 'legacy label', categoryId: null }, 'analytics-uncategorized');
+		await createEntry({ type: 'expense', amount: '5', occurredAt: '2026-09-02T09:00:00+08:00', category: null, categoryId: 1 }, 'analytics-outside');
+		await insertLegacyDueExpense('analytics-due-expense');
+		const reversed = await createEntry({ type: 'expense', amount: '7', occurredAt: '2026-09-01T10:00:00+08:00', category: null, categoryId: 3 }, 'analytics-reversed');
+		const reversal = await request(`/entries/${reversed.body.entry.id}`, { method: 'DELETE', headers: { Authorization: 'Bearer test-key' } });
+		expect(reversal.status).toBe(200);
+
+		const response = await request('/analytics/summary?from=2026-09-01&to=2026-09-02&level=coarse', { headers: { Authorization: 'Bearer test-key' } });
+		expect(response.status).toBe(200);
+		const body = await response.json<any>();
+		expect(body).toMatchObject({ periodIncome: '101', periodExpense: '16', periodNet: '85', currentBalance: '82' });
+		expect(body.items).toHaveLength(8);
+		expect(body.items.find((item: any) => item.id === 2)).toMatchObject({ name: '餐饮', amount: '12', displayAmount: '12.000', count: 1 });
+		expect(body.items.find((item: any) => item.id === 3)).toMatchObject({ amount: '0', count: 0 });
+		expect(body.items.find((item: any) => item.id === null)).toMatchObject({ name: '未分类', amount: '4', count: 1 });
+		expect(body.items.some((item: any) => item.amount === '7')).toBe(false);
+	});
+
+	it('rejects an empty analysis interval', async () => {
+		const response = await request('/analytics/summary?from=2026-09-02&to=2026-09-02&level=coarse', { headers: { Authorization: 'Bearer test-key' } });
+		expect(response.status).toBe(400);
+	});
 });
