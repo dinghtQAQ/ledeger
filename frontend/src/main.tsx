@@ -79,6 +79,16 @@ function entryTypeLabel(type: EntryType) {
 	return type === 'income' ? '收入' : type === 'expense' ? '支出' : '到期支出';
 }
 
+function isReversibleEntry(entry: Entry) {
+	return (entry.type === 'income' || entry.type === 'expense') && !entry.isReversal && !entry.reversedAt;
+}
+
+function reversalErrorMessage(error: unknown) {
+	const message = error instanceof Error ? error.message : '';
+	if (message.includes('already reversed') || message.includes('cannot be reversed')) return '这笔账目已完成冲正，不能重复操作';
+	return message ? `冲正失败：${message}` : '冲正失败，请稍后重试';
+}
+
 function createIdempotencyKey() {
 	return crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
@@ -210,6 +220,8 @@ function EntriesPage() {
 	const [sort, setSort] = useState('occurredAt.desc');
 	const [error, setError] = useState('');
 	const [loadMoreError, setLoadMoreError] = useState('');
+	const [reversalError, setReversalError] = useState('');
+	const [reversingId, setReversingId] = useState<string | null>(null);
 	const [loading, setLoading] = useState(true);
 	const [loadingMore, setLoadingMore] = useState(false);
 
@@ -258,6 +270,21 @@ function EntriesPage() {
 		}
 	}
 
+	async function reverse(entry: Entry) {
+		if (!isReversibleEntry(entry) || reversingId) return;
+		if (!window.confirm('确认冲正这笔账目？系统会保留原记录，并新增一笔相反类型的冲正记录。')) return;
+		setReversingId(entry.id);
+		setReversalError('');
+		try {
+			await api(`/entries/${encodeURIComponent(entry.id)}`, { method: 'DELETE' });
+			await loadEntries();
+		} catch (caught) {
+			setReversalError(reversalErrorMessage(caught));
+		} finally {
+			setReversingId(null);
+		}
+	}
+
 	function resetAndLoad() {
 		void loadEntries();
 	}
@@ -268,6 +295,7 @@ function EntriesPage() {
 	if (error) return <section className="empty-state"><p className="error" role="alert">{error}</p><button type="button" onClick={() => void loadEntries()}>重试</button></section>;
 	return <section className="entries-layout">
 		<div className="entries-toolbar"><div><p className="eyebrow">LEDGER ENTRIES</p><p className="muted">当前显示 {items.length} 笔记录</p></div><button type="button" className="primary-button" onClick={() => navigate('/entries/new')}>新增账目</button></div>
+		{reversalError && <p className="error" role="alert">{reversalError}</p>}
 		<form className="entries-filters" onSubmit={(event) => { event.preventDefault(); resetAndLoad(); }}>
 			<div><label htmlFor="entries-from">开始日期</label><input id="entries-from" type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></div>
 			<div><label htmlFor="entries-to">结束日期</label><input id="entries-to" type="date" value={to} onChange={(event) => setTo(event.target.value)} /></div>
@@ -279,7 +307,7 @@ function EntriesPage() {
 		</form>
 		{items.length ? <div className="entry-list">{items.map((entry) => <article className={`entry-row ${entry.isReversal ? 'reversal' : ''}`} key={entry.id}>
 			<a className="entry-main entry-link" href={`/entries/${entry.id}`} onClick={(event) => { event.preventDefault(); navigate(`/entries/${entry.id}`); }}><strong>{entryTypeLabel(entry.type)}{entry.isReversal && ' · 冲正'}</strong><span className="muted">{displayEntryCategory(entry, categories)}</span><span className="muted">{new Date(entry.occurredAt).toLocaleString('zh-CN')}</span>{entry.isReversal && <span className="reversal-label">冲正记录</span>}</a>
-			<div className="entry-side"><strong className={entry.type === 'income' ? 'amount-income' : 'amount-expense'}>{entry.type === 'income' ? '+' : '-'}{entry.displayAmount}</strong>{entry.note && <span className="muted">{entry.note}</span>}</div>
+			<div className="entry-side"><strong className={entry.type === 'income' ? 'amount-income' : 'amount-expense'}>{entry.type === 'income' ? '+' : '-'}{entry.displayAmount}</strong>{entry.note && <span className="muted">{entry.note}</span>}{entry.reversedAt && <span className="reversal-label">已冲正</span>}{isReversibleEntry(entry) && <button type="button" className="danger-button" onClick={() => void reverse(entry)} disabled={reversingId !== null}>{reversingId === entry.id ? '处理中…' : '冲正这笔账目'}</button>}</div>
 		</article>)}</div> : <div className="empty-state"><h2>没有匹配的账目</h2><p className="muted">尝试调整筛选条件，或记录第一笔账目。</p><button type="button" className="primary-button" onClick={() => navigate('/entries/new')}>新增账目</button></div>}
 		{loadMoreError && <div className="pagination-feedback"><p className="error" role="alert">{loadMoreError}</p><button type="button" className="secondary-button" onClick={() => void loadMore()}>重试加载</button></div>}
 		{nextCursor && !loadMoreError && <button type="button" className="load-more" onClick={() => void loadMore()} disabled={loadingMore}>{loadingMore ? '加载中…' : '加载更多'}</button>}
@@ -318,11 +346,11 @@ function EntryDetailsPage({ id }: { id: string }) {
 	useEffect(() => { void load(); }, [id]);
 
 	async function reverse() {
-		if (!entry || entry.isReversal || entry.reversedAt) return;
+		if (!entry || !isReversibleEntry(entry)) return;
 		if (!window.confirm('确认冲正这笔账目？系统会保留原记录，并新增一笔相反类型的冲正记录。')) return;
 		setBusy(true); setError(''); setMessage('');
 		try { await api(`/entries/${encodeURIComponent(entry.id)}`, { method: 'DELETE' }); setMessage('已完成冲正'); await load(); }
-		catch (caught) { setError(caught instanceof Error ? caught.message : '冲正失败'); }
+		catch (caught) { setError(reversalErrorMessage(caught)); }
 		finally { setBusy(false); }
 	}
 
@@ -336,7 +364,7 @@ function EntryDetailsPage({ id }: { id: string }) {
 		<div className="detail-panel"><div className="detail-amount"><span className="muted">{entryTypeLabel(entry.type)}</span><strong className={positive ? 'amount-income' : 'amount-expense'}>{positive ? '+' : '-'}{entry.displayAmount}</strong></div>
 			<dl className="detail-grid"><div><dt>发生时间</dt><dd>{new Date(entry.occurredAt).toLocaleString('zh-CN')}</dd></div><div><dt>粗分类</dt><dd>{displayEntryCategory(entry, categories)}</dd></div><div><dt>细分类</dt><dd>{entry.subcategoryId ? categories?.fineCategories.find((fine) => fine.id === entry.subcategoryId)?.name || `ID ${entry.subcategoryId}` : '未选择'}</dd></div><div><dt>备注</dt><dd>{entry.note || '无'}</dd></div><div><dt>记录 ID</dt><dd className="detail-id">{entry.id}</dd></div><div><dt>状态</dt><dd>{entry.isReversal ? '冲正记录' : entry.reversedAt ? '已冲正' : '有效'}</dd></div></dl>
 			{relatedEntry && <div className="relation-panel"><span className="muted">关联账目</span><a href={`/entries/${relatedEntry.id}`} onClick={(event) => { event.preventDefault(); navigate(`/entries/${relatedEntry.id}`); }}>{relatedEntry.isReversal ? '查看冲正记录' : '查看原账目'} · {relatedEntry.displayAmount}</a></div>}
-			{!entry.isReversal && !entry.reversedAt && <button type="button" className="danger-button" onClick={() => void reverse()} disabled={busy}>{busy ? '处理中…' : '冲正这笔账目'}</button>}
+			{isReversibleEntry(entry) && <button type="button" className="danger-button" onClick={() => void reverse()} disabled={busy}>{busy ? '处理中…' : '冲正这笔账目'}</button>}
 		</div>
 	</section>;
 }

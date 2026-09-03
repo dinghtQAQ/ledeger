@@ -112,4 +112,99 @@ test.describe('账目列表与详情', () => {
 		await expect(page.getByRole('heading', { name: '账目详情' })).toBeVisible();
 		await expect(page.getByText('第一页')).toBeVisible();
 	});
+
+	test('从列表确认冲正后保留原账目并显示冲正记录', async ({ page }) => {
+		const note = `browser reversal ${Date.now()}`;
+		await page.on('dialog', async (dialog) => {
+			expect(dialog.type()).toBe('confirm');
+			expect(dialog.message()).toContain('确认冲正');
+			await dialog.accept();
+		});
+		await login(page);
+		await openNewEntry(page);
+		await page.getByLabel('粗分类').selectOption('2');
+		await page.getByLabel('金额').fill('7.25');
+		await page.getByLabel('备注（可选）').fill(note);
+		await page.getByRole('button', { name: '保存账目' }).click();
+		await expect(page).toHaveURL(/\/entries$/);
+		const originalRow = page.locator('.entry-row').filter({ has: page.getByText(note, { exact: true }) });
+		await expect(originalRow).toContainText('支出');
+		await originalRow.getByRole('button', { name: '冲正这笔账目' }).click();
+		await expect(originalRow).toContainText('已冲正');
+		await expect(originalRow.getByRole('button', { name: '冲正这笔账目' })).toHaveCount(0);
+		await expect(page.locator('.entry-row.reversal').filter({ hasText: '冲正记录' }).filter({ hasText: note })).toBeVisible();
+	});
+
+	test('冲正确认取消时不发起请求，旧版和冲正记录不显示操作', async ({ page }) => {
+		const ordinary = {
+			id: 'browser-ordinary-entry', type: 'expense', amount: '6.0000', displayAmount: '6.000', occurredAt: '2026-09-02T10:00:00.000Z',
+			category: '餐饮', categoryId: 2, subcategoryId: null, note: 'ordinary cancel', isReversal: false, reversalOf: null, reversedAt: null,
+		};
+		const dueExpense = {
+			id: 'browser-due-expense', type: 'due_expense', amount: '5.0000', displayAmount: '5.000', occurredAt: '2026-09-02T10:00:00.000Z',
+			category: 'legacy', categoryId: null, subcategoryId: null, note: 'legacy due', isReversal: false, reversalOf: null, reversedAt: null,
+		};
+		const reversal = {
+			...dueExpense, id: 'browser-reversal', type: 'income', note: 'Reversal of browser-due-expense', isReversal: true, reversalOf: dueExpense.id,
+		};
+		let deleteCalls = 0;
+		await page.route('**/entries?*', async (route) => {
+			if (route.request().method() === 'GET') return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [ordinary, dueExpense, reversal], nextCursor: null }) });
+			return route.continue();
+		});
+		await page.route('**/entries/*', async (route) => {
+			if (route.request().method() === 'DELETE') deleteCalls += 1;
+			return route.continue();
+		});
+		await page.on('dialog', async (dialog) => dialog.dismiss());
+		await login(page);
+		await page.getByRole('link', { name: '账目' }).click();
+		await expect(page.getByText('ordinary cancel')).toBeVisible();
+		await expect(page.getByText('legacy due')).toBeVisible();
+		await expect(page.getByRole('button', { name: '冲正这笔账目' })).toHaveCount(1);
+		await page.getByText('ordinary cancel').locator('..').locator('..').getByRole('button', { name: '冲正这笔账目' }).click();
+		await expect(page.getByText('ordinary cancel').locator('..').locator('..').getByRole('button', { name: '冲正这笔账目' })).toBeVisible();
+		expect(deleteCalls).toBe(0);
+	});
+
+	test('从详情页确认冲正后显示完成状态和关联记录', async ({ page }) => {
+		const note = `browser detail reversal ${Date.now()}`;
+		await page.on('dialog', async (dialog) => dialog.accept());
+		await login(page);
+		await openNewEntry(page);
+		await page.getByLabel('粗分类').selectOption('2');
+		await page.getByLabel('金额').fill('9');
+		await page.getByLabel('备注（可选）').fill(note);
+		await page.getByRole('button', { name: '保存账目' }).click();
+		await expect(page).toHaveURL(/\/entries$/);
+		await page.locator('.entry-row').filter({ has: page.getByText(note, { exact: true }) }).getByRole('link').click();
+		await expect(page.getByRole('button', { name: '冲正这笔账目' })).toBeVisible();
+		await page.getByRole('button', { name: '冲正这笔账目' }).click();
+		await expect(page.getByText('已冲正', { exact: true })).toBeVisible();
+		await expect(page.getByText('查看冲正记录')).toBeVisible();
+		await expect(page.getByRole('button', { name: '冲正这笔账目' })).toHaveCount(0);
+	});
+
+	test('冲正发生并发冲突时显示明确反馈', async ({ page }) => {
+		const entry = {
+			id: 'browser-conflict-entry', type: 'expense', amount: '5.0000', displayAmount: '5.000', occurredAt: '2026-09-02T10:00:00.000Z',
+			category: '餐饮', categoryId: 2, subcategoryId: null, note: 'conflict entry', isReversal: false, reversalOf: null, reversedAt: null,
+		};
+		await page.route('**/entries/browser-conflict-entry', async (route) => {
+			if (route.request().method() === 'DELETE') return route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: { message: 'entry already reversed' } }) });
+			return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ entry }) });
+		});
+		await page.route('**/entries?*', async (route) => {
+			if (route.request().method() === 'GET') return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [entry], nextCursor: null }) });
+			return route.continue();
+		});
+		await page.on('dialog', async (dialog) => dialog.accept());
+		await login(page);
+		await page.getByRole('link', { name: '账目' }).click();
+		await expect(page.getByText('conflict entry')).toBeVisible();
+		await page.getByRole('link', { name: /支出/ }).click();
+		await expect(page.getByRole('button', { name: '冲正这笔账目' })).toBeVisible();
+		await page.getByRole('button', { name: '冲正这笔账目' }).click();
+		await expect(page.getByRole('status')).toHaveText('这笔账目已完成冲正，不能重复操作');
+	});
 });

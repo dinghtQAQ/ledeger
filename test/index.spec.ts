@@ -330,6 +330,7 @@ describe('Hono worker', () => {
 
 	it('reverses exactly once with an equal amount and opposite type', async () => {
 		const created = await createEntry({ type: 'expense', amount: '100.0016' });
+		const original = created.body.entry;
 		const reversed = await request(`/entries/${created.body.entry.id}`, {
 			method: 'DELETE',
 			headers: { Authorization: 'Bearer test-key' },
@@ -341,6 +342,29 @@ describe('Hono worker', () => {
 		expect(body.reversal.reversalOf).toBe(created.body.entry.id);
 		expect(body.reversal.occurredAt).toBe(created.body.entry.occurredAt);
 		expect(body.entry.reversedAt).toBeTruthy();
+		expect(body.entry).toMatchObject({
+			id: original.id,
+			type: original.type,
+			amount: original.amount,
+			displayAmount: original.displayAmount,
+			occurredAt: original.occurredAt,
+			category: original.category,
+			categoryId: original.categoryId,
+			subcategoryId: original.subcategoryId,
+			note: original.note,
+			isReversal: false,
+			reversalOf: null,
+		});
+		const listed = await request('/entries', { headers: { Authorization: 'Bearer test-key' } });
+		const listedBody = await listed.json<any>();
+		expect(listedBody.items).toHaveLength(2);
+		expect(listedBody.items.find((entry: any) => entry.id === original.id)).toMatchObject({ reversedAt: body.entry.reversedAt });
+		expect(listedBody.items.find((entry: any) => entry.reversalOf === original.id)).toMatchObject({
+			amount: original.amount,
+			type: 'income',
+			reversalOf: original.id,
+			isReversal: true,
+		});
 		const duplicate = await request(`/entries/${created.body.entry.id}`, {
 			method: 'DELETE',
 			headers: { Authorization: 'Bearer test-key' },
