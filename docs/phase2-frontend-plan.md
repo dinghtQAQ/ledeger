@@ -28,7 +28,7 @@ response: 204
 - D1 保存会话哈希、创建时间和过期时间。
 - 会话有效期 7 天，认证请求滑动续期。
 - Cookie 使用 HttpOnly、Secure、SameSite=Lax。
-- 所有写请求校验同源 Origin/Referer。
+- 所有业务写请求（无论使用 Bearer 还是 Cookie 会话）都必须提供 `Origin` 或 `Referer`，并通过同源校验；缺失或跨来源均拒绝。若两者同时存在，以 `Origin` 为准。
 - 每次登录要求 Turnstile；登录失败仍执行轻量限速。
 
 ## 数据模型迁移

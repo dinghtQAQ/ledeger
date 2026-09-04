@@ -4,17 +4,37 @@ import { OpenAPIHono, createRoute } from '@hono/zod-openapi';
 import { amountToUnits, displayAmount, normalizeAmount, unitsToAmount } from './money';
 import {
 	createEntrySchema,
+	entryDetailResponseSchema,
 	entryPageSchema,
 	entryResponseSchema,
 	errorSchema,
 	healthSchema,
+	authLoginSchema,
+	authSessionSchema,
+	categoriesResponseSchema,
+	coarseCategorySchema,
+	fineCategoryCreateSchema,
+	fineCategoryPatchSchema,
+	fineCategorySchema,
+	ledgerSettingsSchema,
+	ledgerSettingsUpdateSchema,
+	analyticsSummaryQuerySchema,
+	analyticsSummarySchema,
 	idParamSchema,
 	listQuerySchema,
 	reversalResponseSchema,
 } from './schemas';
 import { localDateToUtc } from './time';
 
-type LedgerEnv = Env & { LEDGER_API_KEY?: string; LEDGER_TIMEZONE?: string };
+type LedgerEnv = Env & {
+	LEDGER_API_KEY?: string;
+	LEDGER_PASSWORD?: string;
+	TURNSTILE_SECRET_KEY?: string;
+	TURNSTILE_SECRET?: string;
+	TURNSTILE_VERIFY_URL?: string;
+	LEDGER_TIMEZONE?: string;
+	ASSETS?: { fetch: typeof fetch };
+};
 type LedgerContext = Context<{ Bindings: LedgerEnv }>;
 type EntryType = 'income' | 'expense' | 'due_expense';
 type DueStatus = 'unpaid' | 'paid' | 'cancelled';
@@ -26,6 +46,8 @@ type EntryRow = {
 	due_at: string | null;
 	due_status: DueStatus | null;
 	category: string | null;
+	category_id?: number | null;
+	subcategory_id?: number | null;
 	note: string | null;
 	is_reversal: number;
 	reversal_of: string | null;
@@ -35,21 +57,26 @@ type EntryRow = {
 	updated_at: string;
 };
 type StoredEntryRow = EntryRow & { idempotency_payload: string | null };
-type ErrorStatus = 400 | 403 | 404 | 409 | 503;
+type ErrorStatus = 400 | 401 | 403 | 404 | 409 | 429 | 503;
 type Sort = keyof typeof sortMap;
 type CursorContext = {
 	sort: string;
 	from: string | null;
 	to: string | null;
 	category: string | null;
+	type: string | null;
+	categoryId: number | null;
+	subcategoryId: number | null;
 };
 type CursorPayload = { key: string; id: string; context: CursorContext };
 type CreateEntryInput = {
-	type: EntryType;
+	type: 'income' | 'expense';
 	amount: string;
 	occurredAt: string;
 	dueAt?: string;
 	category?: string | null;
+	categoryId?: number | null;
+	subcategoryId?: number | null;
 	note?: string | null;
 };
 type ListEntriesQuery = {
@@ -58,8 +85,13 @@ type ListEntriesQuery = {
 	from?: string;
 	to?: string;
 	category?: string;
+	type?: EntryType;
+	categoryId?: number;
+	subcategoryId?: number;
 	sort: Sort;
 };
+
+type AnalyticsSummaryQuery = { from: string; to: string; level: 'coarse' | 'fine' };
 
 const sortMap = {
 	'occurredAt.desc': 'occurred_at DESC, id DESC',
@@ -69,6 +101,12 @@ const sortMap = {
 	'amount.asc': 'CAST(amount_units AS INTEGER) ASC, id ASC',
 } as const;
 
+const SESSION_COOKIE = 'ledger_session';
+const SESSION_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
+const LOGIN_WINDOW_MS = 60_000;
+const LOGIN_FAILURE_LIMIT = 5;
+const loginFailures = new Map<string, { count: number; resetAt: number }>();
+
 const app = new OpenAPIHono<{ Bindings: LedgerEnv }>({
 	defaultHook: (result, c) => {
 		if (!result.success) return jsonError(c, 400, 'invalid request');
@@ -77,8 +115,141 @@ const app = new OpenAPIHono<{ Bindings: LedgerEnv }>({
 
 const now = () => new Date().toISOString();
 
+type AuthState = { authenticated: boolean; source: 'bearer' | 'session' | 'none'; expiresAt?: string };
+type SessionRow = { token_hash: string; created_at: string; expires_at: string; last_seen_at: string };
+
+function base64Url(bytes: ArrayBuffer | Uint8Array) {
+	const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+	let binary = '';
+	for (const byte of view) binary += String.fromCharCode(byte);
+	return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function hashToken(token: string) {
+	return base64Url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)));
+}
+
+function readCookie(request: Request, name: string) {
+	const header = request.headers.get('Cookie');
+	if (!header) return null;
+	for (const part of header.split(';')) {
+		const [key, ...value] = part.trim().split('=');
+		if (key === name) return value.join('=') || null;
+	}
+	return null;
+}
+
+function sessionCookie(token: string, maxAge = SESSION_LIFETIME_MS / 1000) {
+	return `${SESSION_COOKIE}=${token}; Max-Age=${Math.max(0, Math.floor(maxAge))}; Path=/; HttpOnly; Secure; SameSite=Lax`;
+}
+
+function withCookie(response: Response, cookie: string) {
+	const headers = new Headers(response.headers);
+	headers.append('Set-Cookie', cookie);
+	return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+function renewSessionCookie(c: LedgerContext, response: Response, auth: AuthState) {
+	if (auth.source !== 'session') return response;
+	const token = readCookie(c.req.raw, SESSION_COOKIE);
+	return token ? withCookie(response, sessionCookie(token)) : response;
+}
+
+function sameOrigin(c: LedgerContext) {
+	const expected = new URL(c.req.url).origin;
+	const origin = c.req.header('Origin');
+	if (origin) return origin === expected;
+	const referer = c.req.header('Referer');
+	if (!referer) return false;
+	try {
+		return new URL(referer).origin === expected;
+	} catch {
+		return false;
+	}
+}
+
+function mutationSourceAllowed(c: LedgerContext) {
+	return Boolean(c.req.header('Origin') || c.req.header('Referer')) && sameOrigin(c);
+}
+
+function clientKey(c: LedgerContext) {
+	return c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() || 'unknown';
+}
+
+function isRateLimited(key: string) {
+	const current = Date.now();
+	const record = loginFailures.get(key);
+	if (!record || record.resetAt <= current) {
+		loginFailures.set(key, { count: 0, resetAt: current + LOGIN_WINDOW_MS });
+		return false;
+	}
+	return record.count >= LOGIN_FAILURE_LIMIT;
+}
+
+function recordLoginFailure(key: string) {
+	const current = Date.now();
+	const record = loginFailures.get(key);
+	if (!record || record.resetAt <= current) {
+		loginFailures.set(key, { count: 1, resetAt: current + LOGIN_WINDOW_MS });
+		return;
+	}
+	record.count += 1;
+}
+
+async function verifyTurnstile(c: LedgerContext, token: string) {
+	const secret = c.env.TURNSTILE_SECRET_KEY || c.env.TURNSTILE_SECRET;
+	if (!secret || !token) return false;
+	try {
+		const response = await fetch(c.env.TURNSTILE_VERIFY_URL || 'https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ secret, response: token, remoteip: clientKey(c) }).toString(),
+		});
+		if (!response.ok) return false;
+		const body = (await response.json()) as { success?: boolean };
+		return body.success === true;
+	} catch {
+		return false;
+	}
+}
+
+async function authenticate(c: LedgerContext): Promise<AuthState> {
+	if (c.env.LEDGER_API_KEY && c.req.header('Authorization') === `Bearer ${c.env.LEDGER_API_KEY}`) {
+		return { authenticated: true, source: 'bearer' };
+	}
+	const token = readCookie(c.req.raw, SESSION_COOKIE);
+	if (!token) return { authenticated: false, source: 'none' };
+	const tokenHash = await hashToken(token);
+	const row = await c.env.DB.prepare('SELECT * FROM auth_sessions WHERE token_hash = ?').bind(tokenHash).first<SessionRow>();
+	if (!row) return { authenticated: false, source: 'none' };
+	const current = Date.now();
+	if (Date.parse(row.expires_at) <= current) {
+		await c.env.DB.prepare('DELETE FROM auth_sessions WHERE token_hash = ?').bind(tokenHash).run();
+		return { authenticated: false, source: 'none' };
+	}
+	const expiresAt = new Date(current + SESSION_LIFETIME_MS).toISOString();
+	await c.env.DB.prepare('UPDATE auth_sessions SET expires_at = ?, last_seen_at = ? WHERE token_hash = ?')
+		.bind(expiresAt, new Date(current).toISOString(), tokenHash)
+		.run();
+	return { authenticated: true, source: 'session', expiresAt };
+}
+
 function jsonError(c: LedgerContext, status: ErrorStatus, message: string): Response {
 	return c.json({ error: { message } }, status);
+}
+
+function acceptsHtml(c: LedgerContext) {
+	return c.req.header('Accept')?.includes('text/html') ?? false;
+}
+
+async function serveSpa(c: LedgerContext) {
+	if (!c.env.ASSETS) return null;
+	const response = await c.env.ASSETS.fetch(new Request(new URL('/', c.req.url), c.req.raw));
+	return response.status === 404 ? null : response;
+}
+
+function isSpaRoute(pathname: string) {
+	return pathname === '/analytics' || pathname === '/settings' || /^\/entries(?:\/[^/]+)?$/.test(pathname);
 }
 
 function registerOpenApi(route: unknown, handler: (c: LedgerContext) => unknown) {
@@ -101,6 +272,8 @@ function toEntry(row: EntryRow) {
 		dueAt: row.due_at,
 		dueStatus: row.due_status,
 		category: row.category,
+		categoryId: row.category_id ?? null,
+		subcategoryId: row.subcategory_id ?? null,
 		note: row.note,
 		isReversal: row.is_reversal === 1,
 		reversalOf: row.reversal_of,
@@ -109,11 +282,6 @@ function toEntry(row: EntryRow) {
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
 	};
-}
-
-function requireAuth(c: Context<{ Bindings: LedgerEnv }>) {
-	const configured = c.env.LEDGER_API_KEY;
-	return Boolean(configured && c.req.header('Authorization') === `Bearer ${configured}`);
 }
 
 function encodeCursor(value: CursorPayload) {
@@ -143,15 +311,21 @@ function isCursorPayload(value: unknown): value is CursorPayload {
 		(candidate.context.from === null || typeof candidate.context.from === 'string') &&
 		(candidate.context.to === null || typeof candidate.context.to === 'string') &&
 		(candidate.context.category === null || typeof candidate.context.category === 'string')
+		&& (candidate.context.type === undefined || candidate.context.type === null || typeof candidate.context.type === 'string')
+		&& (candidate.context.categoryId === undefined || candidate.context.categoryId === null || typeof candidate.context.categoryId === 'number')
+		&& (candidate.context.subcategoryId === undefined || candidate.context.subcategoryId === null || typeof candidate.context.subcategoryId === 'number')
 	);
 }
 
-function cursorContext(query: { sort: string; from?: string; to?: string; category?: string }): CursorContext {
+function cursorContext(query: { sort: string; from?: string; to?: string; category?: string; type?: string; categoryId?: number; subcategoryId?: number }): CursorContext {
 	return {
 		sort: query.sort,
 		from: query.from ?? null,
 		to: query.to ?? null,
 		category: query.category ?? null,
+		type: query.type ?? null,
+		categoryId: query.categoryId ?? null,
+		subcategoryId: query.subcategoryId ?? null,
 	};
 }
 
@@ -186,6 +360,35 @@ const healthDbRoute = createRoute({
 	responses: {
 		200: { description: 'Database health status', content: { 'application/json': { schema: healthSchema } } },
 		503: errorResponse,
+	},
+});
+
+const authLoginRoute = createRoute({
+	method: 'post',
+	path: '/auth/login',
+	request: { body: { required: true, content: { 'application/json': { schema: authLoginSchema } } } },
+	responses: {
+		200: { description: 'Authenticated', content: { 'application/json': { schema: authSessionSchema } } },
+		400: errorResponse,
+		401: errorResponse,
+		429: errorResponse,
+	},
+});
+
+const authSessionRoute = createRoute({
+	method: 'get',
+	path: '/auth/session',
+	responses: {
+		200: { description: 'Session state', content: { 'application/json': { schema: authSessionSchema } } },
+	},
+});
+
+const authLogoutRoute = createRoute({
+	method: 'post',
+	path: '/auth/logout',
+	responses: {
+		204: { description: 'Logged out' },
+		403: errorResponse,
 	},
 });
 
@@ -231,7 +434,7 @@ const entryByIdRoute = createRoute({
 	security: [{ bearerAuth: [] }],
 	request: { params: idParamSchema },
 	responses: {
-		200: { description: 'Entry', content: { 'application/json': { schema: entryResponseSchema } } },
+		200: { description: 'Entry and its reversal relationship', content: { 'application/json': { schema: entryDetailResponseSchema } } },
 		403: errorResponse,
 		404: errorResponse,
 	},
@@ -263,6 +466,90 @@ const payEntryRoute = createRoute({
 	},
 });
 
+const categoriesRoute = createRoute({
+	method: 'get',
+	path: '/categories',
+	security: [{ bearerAuth: [] }],
+	responses: {
+		200: { description: 'Categories', content: { 'application/json': { schema: categoriesResponseSchema } } },
+		403: errorResponse,
+	},
+});
+
+const fineCategoryCreateRoute = createRoute({
+	method: 'post',
+	path: '/categories/fine',
+	security: [{ bearerAuth: [] }],
+	request: { body: { required: true, content: { 'application/json': { schema: fineCategoryCreateSchema } } } },
+	responses: {
+		201: { description: 'Created', content: { 'application/json': { schema: fineCategorySchema } } },
+		400: errorResponse,
+		403: errorResponse,
+	},
+});
+
+const fineCategoryPatchRoute = createRoute({
+	method: 'patch',
+	path: '/categories/fine/{id}',
+	security: [{ bearerAuth: [] }],
+	request: {
+		params: idParamSchema,
+		body: { required: true, content: { 'application/json': { schema: fineCategoryPatchSchema } } },
+	},
+	responses: {
+		200: { description: 'Updated', content: { 'application/json': { schema: fineCategorySchema } } },
+		400: errorResponse,
+		403: errorResponse,
+		404: errorResponse,
+	},
+});
+
+const fineCategoryDisableRoute = createRoute({
+	method: 'post',
+	path: '/categories/fine/{id}/disable',
+	security: [{ bearerAuth: [] }],
+	request: { params: idParamSchema },
+	responses: {
+		200: { description: 'Disabled', content: { 'application/json': { schema: fineCategorySchema } } },
+		403: errorResponse,
+		404: errorResponse,
+	},
+});
+
+const ledgerSettingsGetRoute = createRoute({
+	method: 'get',
+	path: '/settings/ledger',
+	security: [{ bearerAuth: [] }],
+	responses: {
+		200: { description: 'Ledger settings', content: { 'application/json': { schema: ledgerSettingsSchema } } },
+		403: errorResponse,
+	},
+});
+
+const ledgerSettingsPutRoute = createRoute({
+	method: 'put',
+	path: '/settings/ledger',
+	security: [{ bearerAuth: [] }],
+	request: { body: { required: true, content: { 'application/json': { schema: ledgerSettingsUpdateSchema } } } },
+	responses: {
+		200: { description: 'Updated settings', content: { 'application/json': { schema: ledgerSettingsSchema } } },
+		400: errorResponse,
+		403: errorResponse,
+	},
+});
+
+const analyticsSummaryRoute = createRoute({
+	method: 'get',
+	path: '/analytics/summary',
+	security: [{ bearerAuth: [] }],
+	request: { query: analyticsSummaryQuerySchema },
+	responses: {
+		200: { description: 'Analytics summary', content: { 'application/json': { schema: analyticsSummarySchema } } },
+		400: errorResponse,
+		403: errorResponse,
+	},
+});
+
 registerOpenApi(healthRoute, (c: LedgerContext) => c.json({ status: 'ok' }, 200));
 
 registerOpenApi(healthDbRoute, async (c: LedgerContext) => {
@@ -275,7 +562,59 @@ registerOpenApi(healthDbRoute, async (c: LedgerContext) => {
 	}
 });
 
-app.get('/', (c) => c.text('Hello World!'));
+registerOpenApi(authLoginRoute, async (c: LedgerContext) => {
+	if (c.req.header('Origin') || c.req.header('Referer')) {
+		if (!sameOrigin(c)) return jsonError(c, 403, 'forbidden');
+	}
+	const key = clientKey(c);
+	if (isRateLimited(key)) {
+		const response = jsonError(c, 429, 'authentication failed');
+		response.headers.set('Retry-After', '60');
+		return response;
+	}
+	const input = validated<{ password: string; turnstileToken: string }>(c, 'json');
+	const configuredPassword = c.env.LEDGER_PASSWORD;
+	const turnstileValid = await verifyTurnstile(c, input.turnstileToken);
+	if (!configuredPassword || input.password !== configuredPassword || !turnstileValid) {
+		recordLoginFailure(key);
+		return jsonError(c, 401, 'authentication failed');
+	}
+	const token = base64Url(crypto.getRandomValues(new Uint8Array(32)));
+	const tokenHash = await hashToken(token);
+	const createdAt = new Date();
+	const expiresAt = new Date(createdAt.getTime() + SESSION_LIFETIME_MS).toISOString();
+	await c.env.DB.prepare('INSERT INTO auth_sessions (token_hash, created_at, expires_at, last_seen_at) VALUES (?, ?, ?, ?)')
+		.bind(tokenHash, createdAt.toISOString(), expiresAt, createdAt.toISOString())
+		.run();
+	loginFailures.delete(key);
+	const response = c.json({ authenticated: true, expiresAt }, 200);
+	return withCookie(response, sessionCookie(token));
+});
+
+registerOpenApi(authSessionRoute, async (c: LedgerContext) => {
+	const auth = await authenticate(c);
+	if (!auth.authenticated) return c.json({ authenticated: false }, 200);
+	return renewSessionCookie(c, c.json({ authenticated: true, expiresAt: auth.expiresAt }, 200), auth);
+});
+
+registerOpenApi(authLogoutRoute, async (c: LedgerContext) => {
+	if (c.req.header('Origin') || c.req.header('Referer')) {
+		if (!sameOrigin(c)) return jsonError(c, 403, 'forbidden');
+	}
+	const token = readCookie(c.req.raw, SESSION_COOKIE);
+	if (token) {
+		await c.env.DB.prepare('DELETE FROM auth_sessions WHERE token_hash = ?').bind(await hashToken(token)).run();
+	}
+	return withCookie(new Response(null, { status: 204 }), sessionCookie('', 0));
+});
+
+app.get('/', async (c) => {
+	if (c.env.ASSETS && c.req.header('Accept')?.includes('text/html')) {
+		const asset = await serveSpa(c);
+		if (asset) return asset;
+	}
+	return c.text('Hello World!');
+});
 
 app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', {
 	type: 'http',
@@ -295,9 +634,198 @@ app.doc('/openapi.json', {
 
 app.get('/docs', swaggerUI({ url: '/openapi.json', persistAuthorization: true }));
 
-app.use('/entries', async (c, next) => {
-	if (!requireAuth(c)) return jsonError(c, 403, 'forbidden');
+async function protectApi(c: LedgerContext, next: () => Promise<void>) {
+	if (c.req.method === 'GET' && acceptsHtml(c) && isSpaRoute(new URL(c.req.url).pathname)) {
+		const spa = await serveSpa(c);
+		if (spa) return spa as never;
+	}
+	const auth = await authenticate(c);
+	if (!auth.authenticated) return jsonError(c, 403, 'forbidden') as never;
+	const mutating = !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method);
+	if (mutating && !mutationSourceAllowed(c)) return jsonError(c, 403, 'forbidden') as never;
 	await next();
+	c.res = renewSessionCookie(c, c.res, auth);
+}
+
+app.use('/categories', protectApi);
+app.use('/settings', protectApi);
+app.use('/analytics', protectApi);
+
+app.use('/entries', async (c, next) => {
+	if (c.req.method === 'GET' && acceptsHtml(c) && isSpaRoute(new URL(c.req.url).pathname)) {
+		const spa = await serveSpa(c);
+		if (spa) return spa as never;
+	}
+	const auth = await authenticate(c);
+	if (!auth.authenticated) return jsonError(c, 403, 'forbidden');
+	const mutating = !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method);
+	if (mutating && !mutationSourceAllowed(c)) {
+		return jsonError(c, 403, 'forbidden');
+	}
+	await next();
+	c.res = renewSessionCookie(c, c.res, auth);
+});
+
+app.get('/entries/new', async (c) => {
+	const spa = await serveSpa(c);
+	return spa ?? c.text('Not Found', 404);
+});
+
+function toFineCategory(row: { id: number; name: string; coarse_category_id: number; sort_order: number; is_active: number }) {
+	return {
+		id: row.id,
+		name: row.name,
+		coarseCategoryId: row.coarse_category_id,
+		sortOrder: row.sort_order,
+		isActive: row.is_active === 1,
+	};
+}
+
+registerOpenApi(categoriesRoute, async (c: LedgerContext) => {
+	const coarse = await c.env.DB.prepare('SELECT id, name FROM coarse_categories ORDER BY id').all<{ id: number; name: string }>();
+	const fine = await c.env.DB.prepare('SELECT id, name, coarse_category_id, sort_order, is_active FROM fine_categories ORDER BY coarse_category_id, sort_order, id').all<{
+		id: number; name: string; coarse_category_id: number; sort_order: number; is_active: number;
+	}>();
+	return c.json({ coarseCategories: coarse.results, fineCategories: fine.results.map(toFineCategory) }, 200);
+});
+
+registerOpenApi(fineCategoryCreateRoute, async (c: LedgerContext) => {
+	const input = validated<{ name: string; coarseCategoryId: number; sortOrder?: number }>(c, 'json');
+	const parent = await c.env.DB.prepare('SELECT id FROM coarse_categories WHERE id = ?').bind(input.coarseCategoryId).first();
+	if (!parent) return jsonError(c, 400, 'invalid coarse category');
+	let sortOrder = input.sortOrder;
+	if (sortOrder === undefined) {
+		const last = await c.env.DB.prepare('SELECT COALESCE(MAX(sort_order), -1) AS value FROM fine_categories WHERE coarse_category_id = ?').bind(input.coarseCategoryId).first<{ value: number }>();
+		sortOrder = (last?.value ?? -1) + 1;
+	}
+	const result = await c.env.DB.prepare('INSERT INTO fine_categories (name, coarse_category_id, sort_order, is_active) VALUES (?, ?, ?, 1)')
+		.bind(input.name, input.coarseCategoryId, sortOrder).run();
+	const row = await c.env.DB.prepare('SELECT id, name, coarse_category_id, sort_order, is_active FROM fine_categories WHERE id = ?').bind(result.meta.last_row_id).first<{
+		id: number; name: string; coarse_category_id: number; sort_order: number; is_active: number;
+	}>();
+	return c.json(toFineCategory(row!), 201);
+});
+
+registerOpenApi(fineCategoryPatchRoute, async (c: LedgerContext) => {
+	const { id } = validated<{ id: string }>(c, 'param');
+	const input = validated<{ name?: string; sortOrder?: number }>(c, 'json');
+	const existing = await c.env.DB.prepare('SELECT id, name, coarse_category_id, sort_order, is_active FROM fine_categories WHERE id = ?').bind(Number(id)).first<{
+		id: number; name: string; coarse_category_id: number; sort_order: number; is_active: number;
+	}>();
+	if (!existing) return jsonError(c, 404, 'fine category not found');
+	const name = input.name ?? existing.name;
+	const sortOrder = input.sortOrder ?? existing.sort_order;
+	await c.env.DB.prepare('UPDATE fine_categories SET name = ?, sort_order = ? WHERE id = ?').bind(name, sortOrder, existing.id).run();
+	return c.json(toFineCategory({ ...existing, name, sort_order: sortOrder }), 200);
+});
+
+registerOpenApi(fineCategoryDisableRoute, async (c: LedgerContext) => {
+	const { id } = validated<{ id: string }>(c, 'param');
+	const existing = await c.env.DB.prepare('SELECT id, name, coarse_category_id, sort_order, is_active FROM fine_categories WHERE id = ?').bind(Number(id)).first<{
+		id: number; name: string; coarse_category_id: number; sort_order: number; is_active: number;
+	}>();
+	if (!existing) return jsonError(c, 404, 'fine category not found');
+	await c.env.DB.prepare('UPDATE fine_categories SET is_active = 0 WHERE id = ?').bind(existing.id).run();
+	return c.json(toFineCategory({ ...existing, is_active: 0 }), 200);
+});
+
+app.delete('/categories/fine/:id', (c: LedgerContext) => jsonError(c, 409, 'fine categories cannot be deleted'));
+
+registerOpenApi(ledgerSettingsGetRoute, async (c: LedgerContext) => {
+	const row = await c.env.DB.prepare('SELECT payday_day FROM ledger_settings WHERE id = 1').first<{ payday_day: number }>();
+	return c.json({ paydayDay: row?.payday_day ?? 20, timezone: c.env.LEDGER_TIMEZONE || 'Asia/Shanghai' }, 200);
+});
+
+registerOpenApi(ledgerSettingsPutRoute, async (c: LedgerContext) => {
+	const input = validated<{ paydayDay?: number; paydayAnchor?: number; payday?: number }>(c, 'json');
+	const paydayDay = input.paydayDay ?? input.paydayAnchor ?? input.payday;
+	if (!paydayDay || paydayDay < 1 || paydayDay > 28) return jsonError(c, 400, 'paydayDay must be between 1 and 28');
+	await c.env.DB.prepare('INSERT INTO ledger_settings (id, payday_day, updated_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET payday_day = excluded.payday_day, updated_at = excluded.updated_at')
+		.bind(paydayDay, now()).run();
+	return c.json({ paydayDay, timezone: c.env.LEDGER_TIMEZONE || 'Asia/Shanghai' }, 200);
+});
+
+registerOpenApi(analyticsSummaryRoute, async (c: LedgerContext) => {
+	const query = validated<AnalyticsSummaryQuery>(c, 'query');
+	if (query.from >= query.to) return jsonError(c, 400, 'from must be before to');
+	const timezone = c.env.LEDGER_TIMEZONE || 'Asia/Shanghai';
+	const fromUtc = localDateToUtc(query.from, timezone);
+	const toUtc = localDateToUtc(query.to, timezone);
+	const validWhere = "type IN ('income', 'expense') AND is_reversal = 0 AND reversal_of IS NULL AND reversed_at IS NULL";
+	const rows = await c.env.DB.prepare(`SELECT type, amount_units, category_id, subcategory_id FROM entries WHERE ${validWhere}`).all<{
+		type: 'income' | 'expense'; amount_units: string; category_id: number | null; subcategory_id: number | null;
+	}>();
+	const periodRows = await c.env.DB.prepare(`SELECT type, amount_units, category_id, subcategory_id FROM entries WHERE ${validWhere} AND occurred_at >= ? AND occurred_at < ?`)
+		.bind(fromUtc, toUtc).all<{
+			type: 'income' | 'expense'; amount_units: string; category_id: number | null; subcategory_id: number | null;
+		}>();
+	const coarseRows = await c.env.DB.prepare('SELECT id, name FROM coarse_categories ORDER BY id').all<{ id: number; name: string }>();
+	const coarseNames = new Map(coarseRows.results.map((row) => [row.id, row.name]));
+	const fineRows = await c.env.DB.prepare('SELECT id, name, coarse_category_id FROM fine_categories ORDER BY coarse_category_id, sort_order, id').all<{
+		id: number; name: string; coarse_category_id: number;
+	}>();
+	const fineById = new Map(fineRows.results.map((row) => [row.id, row]));
+	const sum = (items: typeof periodRows.results, type: 'income' | 'expense') => items.filter((row) => row.type === type).reduce((total, row) => total + BigInt(row.amount_units), 0n);
+	const periodIncomeUnits = sum(periodRows.results, 'income');
+	const periodExpenseUnits = sum(periodRows.results, 'expense');
+	const balanceUnits = rows.results.reduce((total, row) => total + (row.type === 'income' ? 1n : -1n) * BigInt(row.amount_units), 0n);
+	const grouped = new Map<string, { id: number | null; name: string; parentId?: number; parentName?: string; units: bigint; count: number }>();
+	if (query.level === 'coarse') {
+		for (const row of coarseRows.results) grouped.set(`coarse:${row.id}`, { id: row.id, name: row.name, units: 0n, count: 0 });
+	} else {
+		for (const row of fineRows.results) {
+			grouped.set(`fine:${row.id}`, {
+				id: row.id,
+				name: row.name,
+				parentId: row.coarse_category_id,
+				parentName: coarseNames.get(row.coarse_category_id) ?? '未分类',
+				units: 0n,
+				count: 0,
+			});
+		}
+	}
+	for (const row of periodRows.results) {
+		if (row.type !== 'expense') continue;
+		let key: string;
+		let id: number | null;
+		let name: string;
+		let parentId: number | undefined;
+		let parentName: string | undefined;
+		if (query.level === 'coarse' && row.category_id !== null && coarseNames.has(row.category_id)) {
+			key = `coarse:${row.category_id}`; id = row.category_id; name = coarseNames.get(row.category_id)!;
+		} else if (query.level === 'fine' && row.subcategory_id !== null && fineById.has(row.subcategory_id)) {
+			const fine = fineById.get(row.subcategory_id)!;
+			key = `fine:${fine.id}`;
+			id = fine.id;
+			name = fine.name;
+			parentId = fine.coarse_category_id;
+			parentName = coarseNames.get(fine.coarse_category_id) ?? '未分类';
+		} else {
+			key = 'uncategorized'; id = null; name = '未分类';
+		}
+		const current = grouped.get(key) ?? { id, name, parentId, parentName, units: 0n, count: 0 };
+		current.units += BigInt(row.amount_units); current.count += 1; grouped.set(key, current);
+	}
+	return c.json({
+		from: query.from,
+		to: query.to,
+		periodIncome: unitsToAmount(periodIncomeUnits),
+		periodExpense: unitsToAmount(periodExpenseUnits),
+		periodNet: unitsToAmount(periodIncomeUnits - periodExpenseUnits),
+		currentBalance: unitsToAmount(balanceUnits),
+		items: [...grouped.values()].map((item) => {
+			const amount = unitsToAmount(item.units);
+			return {
+				id: item.id,
+				name: item.name,
+				...(item.parentId === undefined ? {} : { parentId: item.parentId }),
+				...(item.parentName === undefined ? {} : { parentName: item.parentName }),
+				amount,
+				displayAmount: item.units === 0n ? '0.000' : displayAmount(amount),
+				count: item.count,
+			};
+		}),
+	}, 200);
 });
 
 registerOpenApi(createEntryRoute, async (c: LedgerContext) => {
@@ -311,10 +839,22 @@ registerOpenApi(createEntryRoute, async (c: LedgerContext) => {
 		return jsonError(c, 400, 'invalid amount');
 	}
 	const occurredAt = new Date(input.occurredAt).toISOString();
-	const dueAt = input.type === 'due_expense' ? new Date(input.dueAt!).toISOString() : null;
+	const dueAt = null;
+	const categoryId = input.categoryId ?? null;
+	const subcategoryId = input.subcategoryId ?? null;
+	if (input.type === 'expense' && categoryId === null) return jsonError(c, 400, 'expense category is required');
+	if (subcategoryId !== null && categoryId === null) return jsonError(c, 400, 'subcategory requires a coarse category');
+	if (categoryId !== null) {
+		const coarse = await c.env.DB.prepare('SELECT id FROM coarse_categories WHERE id = ?').bind(categoryId).first();
+		if (!coarse) return jsonError(c, 400, 'invalid coarse category');
+	}
+	if (subcategoryId !== null) {
+		const fine = await c.env.DB.prepare('SELECT id FROM fine_categories WHERE id = ? AND coarse_category_id = ? AND is_active = 1').bind(subcategoryId, categoryId).first();
+		if (!fine) return jsonError(c, 400, 'invalid or inactive fine category');
+	}
 	const category = input.category ?? null;
 	const note = input.note ?? null;
-	const payload = JSON.stringify({ type: input.type, amount, occurredAt, dueAt, category, note });
+	const payload = JSON.stringify({ type: input.type, amount, occurredAt, dueAt, category, categoryId, subcategoryId, note });
 	const existing = await c.env.DB.prepare('SELECT * FROM entries WHERE idempotency_key = ?').bind(idempotencyKey).first<StoredEntryRow>();
 	if (existing) {
 		if (existing.idempotency_payload !== payload) {
@@ -329,8 +869,8 @@ registerOpenApi(createEntryRoute, async (c: LedgerContext) => {
 		await c.env.DB.prepare(
 			`INSERT INTO entries (
 				id, type, amount_units, occurred_at, due_at, due_status,
-				category, note, idempotency_key, idempotency_payload, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				category, category_id, subcategory_id, note, idempotency_key, idempotency_payload, created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 			.bind(
 				id,
@@ -338,8 +878,10 @@ registerOpenApi(createEntryRoute, async (c: LedgerContext) => {
 				amountToUnits(amount).toString(),
 				occurredAt,
 				dueAt,
-				input.type === 'due_expense' ? 'unpaid' : null,
+				null,
 				category,
+				categoryId,
+				subcategoryId,
 				note,
 				idempotencyKey,
 				payload,
@@ -384,6 +926,18 @@ registerOpenApi(listEntriesRoute, async (c: LedgerContext) => {
 		where.push('category = ?');
 		bindings.push(query.category);
 	}
+	if (query.type) {
+		where.push('type = ?');
+		bindings.push(query.type);
+	}
+	if (query.categoryId !== undefined) {
+		where.push('category_id = ?');
+		bindings.push(query.categoryId);
+	}
+	if (query.subcategoryId !== undefined) {
+		where.push('subcategory_id = ?');
+		bindings.push(query.subcategoryId);
+	}
 
 	const context = cursorContext(query);
 	if (query.cursor) {
@@ -413,10 +967,17 @@ registerOpenApi(listEntriesRoute, async (c: LedgerContext) => {
 });
 
 registerOpenApi(entryByIdRoute, async (c: LedgerContext) => {
+	if (acceptsHtml(c)) {
+		const spa = await serveSpa(c);
+		if (spa) return spa;
+	}
 	const { id } = validated<{ id: string }>(c, 'param');
 	const row = await c.env.DB.prepare('SELECT * FROM entries WHERE id = ?').bind(id).first<EntryRow>();
 	if (!row) return jsonError(c, 404, 'entry not found');
-	return c.json({ entry: toEntry(row) }, 200);
+	const relatedRow = row.reversal_of
+		? await c.env.DB.prepare('SELECT * FROM entries WHERE id = ?').bind(row.reversal_of).first<EntryRow>()
+		: await c.env.DB.prepare('SELECT * FROM entries WHERE reversal_of = ?').bind(row.id).first<EntryRow>();
+	return c.json({ entry: toEntry(row), relatedEntry: relatedRow ? toEntry(relatedRow) : null }, 200);
 });
 
 registerOpenApi(reverseEntryRoute, async (c: LedgerContext) => {
@@ -437,15 +998,17 @@ registerOpenApi(reverseEntryRoute, async (c: LedgerContext) => {
 		await c.env.DB.batch([
 			c.env.DB.prepare(
 				`INSERT INTO entries (
-					id, type, amount_units, occurred_at, category, note,
+					id, type, amount_units, occurred_at, category, category_id, subcategory_id, note,
 					is_reversal, reversal_of, created_at, updated_at
-				) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
-			).bind(
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+				).bind(
 				reversalId,
 				reverseType,
 				row.amount_units,
 				row.occurred_at,
 				row.category,
+				row.category_id ?? null,
+				row.subcategory_id ?? null,
 				`Reversal of ${row.id}${row.note ? `: ${row.note}` : ''}`,
 				id,
 				timestamp,
@@ -486,6 +1049,21 @@ registerOpenApi(payEntryRoute, async (c: LedgerContext) => {
 	if (!result.meta.changes) return jsonError(c, 409, 'entry was modified');
 	const updated = await c.env.DB.prepare('SELECT * FROM entries WHERE id = ?').bind(id).first<EntryRow>();
 	return c.json({ entry: toEntry(updated as EntryRow) }, 200);
+});
+
+app.notFound(async (c) => {
+	const pathname = new URL(c.req.url).pathname;
+	const apiPath = /^\/(?:auth|entries|categories|settings|analytics)(?:\/|$)/.test(pathname);
+	if (apiPath) return jsonError(c, 404, 'not found');
+	if (c.env.ASSETS) {
+		const assetResponse = await c.env.ASSETS.fetch(c.req.raw);
+		if (assetResponse.status !== 404) return assetResponse;
+		if (!pathname.includes('.')) {
+			const spa = await serveSpa(c);
+			if (spa) return spa;
+		}
+	}
+	return c.text('Not Found', 404);
 });
 
 export default app satisfies ExportedHandler<Env>;
