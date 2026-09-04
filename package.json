@@ -4,18 +4,19 @@
 	"private": true,
 	"packageManager": "pnpm@10.33.0",
 	"scripts": {
-		"build": "vite build",
-		"deploy": "wrangler deploy",
+		"build": "node scripts/build.mjs",
+		"deploy": "node scripts/deploy.mjs",
 		"dev": "wrangler dev",
 		"start": "wrangler dev",
 		"test": "vitest run",
 		"test:browser": "playwright test",
 		"test:migrations": "node scripts/verify-migrations.mjs",
+		"test:release-gates": "node --test test/release-gates.test.mjs",
 		"test:watch": "vitest",
 		"typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.frontend.json && tsc --noEmit -p test/tsconfig.json",
 		"check": "pnpm run typecheck && pnpm run test",
 		"cf-typegen": "wrangler types",
-		"deploy:dry-run": "wrangler deploy --dry-run"
+		"deploy:dry-run": "node scripts/deploy.mjs --dry-run"
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-plugin": "^1.0.0",

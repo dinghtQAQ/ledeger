@@ -83,7 +83,7 @@ Workers Builds 建议配置：
 
 ## 配置与密钥
 
-- 公共 Worker 配置放在 `wrangler.jsonc`；个人生产配置使用未提交的独立 Wrangler 配置文件。
+- 公共 Worker 配置放在 `wrangler.jsonc`；生产配置可从已提交的 `wrangler.production.example.jsonc` 复制为未提交的 `wrangler.production.jsonc`。
 - 本地非敏感变量放在 `.dev.vars`；敏感变量使用 `.dev.vars` 文件或 `.dev.vars.example` 约定，均不会提交。
 - 线上密钥使用 `pnpm exec wrangler secret put <NAME>` 写入，不放进仓库。
 - D1 binding 名称为 `DB`，数据库名为 `ledeger-db`。
@@ -97,16 +97,16 @@ LEDGER_API_KEY=replace-with-a-local-secret
 LEDGER_TIMEZONE=Asia/Shanghai
 ```
 
-生产环境请使用单独的未提交 Wrangler 配置文件（例如 `wrangler.production.jsonc`），在其中填写生产 D1 的 `database_id`，并通过 `--config wrangler.production.jsonc` 部署。不要把个人 D1 ID 或密钥写入公共配置。
+生产环境请从 `wrangler.production.example.jsonc` 创建未提交的 `wrangler.production.jsonc`，填写生产 D1 的 `database_id`，并通过 `--config wrangler.production.jsonc` 部署。不要把个人 D1 ID 或密钥写入公共配置。
 
 第二阶段生产发布检查：
 
 - 必需 Worker Secret：`LEDGER_PASSWORD`、`TURNSTILE_SECRET_KEY`；不要把密码或 Turnstile 私钥写入前端、`wrangler.jsonc` 或提交的变量文件。
 - 构建时配置 Turnstile 公钥 `VITE_TURNSTILE_SITE_KEY`（可公开，需与生产域名匹配）；`TURNSTILE_VERIFY_URL` 仅用于本地测试 stub，生产使用 Cloudflare 默认校验地址。
 - 必需非敏感变量：`LEDGER_TIMEZONE`（例如 `Asia/Shanghai`）；它决定工资周期和日期筛选的本地日历边界。
-- 生产 D1 先执行 `pnpm exec wrangler d1 migrations apply ledeger-db --remote --config wrangler.production.jsonc`，再运行 `pnpm run check`、`pnpm run test:browser` 和 `pnpm run deploy:dry-run -- --config wrangler.production.jsonc`。
+- 生产 D1 先执行 `pnpm exec wrangler d1 migrations apply ledeger-db --remote --config wrangler.production.jsonc`，再运行 `pnpm run check`、`pnpm run test:browser` 和 `VITE_TURNSTILE_SITE_KEY=<production-site-key> pnpm run deploy:dry-run -- --config wrangler.production.jsonc`。发布脚本会先构建 SPA，检查 `dist/index.html`、静态资源和 `ASSETS` 绑定，再执行 Wrangler dry-run；缺少生产公钥或误用测试 key 会明确失败。
 - 发布前可用 `pnpm run test:migrations` 在临时本地 D1 上完整执行全部 migration 两次，确认迁移可重复应用。
-- Worker 的 `assets.directory` 指向 `dist`；部署前运行 `pnpm run build`。未知 API 路径保持 JSON 404，非 API 的 SPA 路径由同一 Worker 回退到 `index.html`。
+- Worker 的 `assets.directory` 指向 `dist`，且必须设置 `binding: "ASSETS"` 与 `run_worker_first: true`；`pnpm run build` 在本地测试时使用固定测试 key，生产发布脚本会拒绝测试 key。未知 API 路径保持 JSON 404，非 API 的 SPA 路径由同一 Worker 回退到 `index.html`。
 
 首次创建 D1 数据库（只需执行一次）：
 

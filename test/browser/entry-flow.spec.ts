@@ -287,6 +287,15 @@ test.describe('账目列表与详情', () => {
 });
 
 test.describe('发布边界与设置', () => {
+	test('分析、账目和设置路径都由同一 Worker 返回 SPA shell', async ({ page }) => {
+		for (const pathname of ['/analytics', '/entries', '/settings']) {
+			const response = await page.request.get(pathname, { headers: { Accept: 'text/html' } });
+			expect(response.status()).toBe(200);
+			expect(response.headers()['content-type']).toContain('text/html');
+			expect(await response.text()).toContain('<div id="root"></div>');
+		}
+	});
+
 	test('未认证访问受保护路由时回到登录页', async ({ page }) => {
 		await page.goto('/settings');
 		await expect(page).toHaveURL(/\/login$/);

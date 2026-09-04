@@ -156,7 +156,7 @@ function displayEntryCategory(entry: Entry, categories: CategoriesResponse | nul
 }
 
 function Turnstile({ onToken }: { onToken: (token: string) => void }) {
-	const siteKey = import.meta.env.VITE_TURNSTILE_SITE_KEY || '1x00000000000000000000AA';
+	const siteKey = import.meta.env.VITE_TURNSTILE_SITE_KEY;
 	const [ready, setReady] = useState(Boolean(window.turnstile));
 	useEffect(() => {
 		if (window.turnstile) {
