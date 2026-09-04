@@ -231,6 +231,37 @@ test.describe('账目列表与详情', () => {
 		await expect(page.getByRole('button', { name: '冲正这笔账目' })).toHaveCount(0);
 	});
 
+	test('列表窗口之外的冲正记录仍可从详情双向跳转', async ({ page }) => {
+		const original = {
+			id: 'browser-link-original', type: 'expense', amount: '11.0000', displayAmount: '11.000', occurredAt: '2026-09-02T10:00:00.000Z',
+			category: '餐饮', categoryId: 2, subcategoryId: null, note: 'windowed original', isReversal: false, reversalOf: null, reversedAt: '2026-09-02T10:01:00.000Z',
+		};
+		const reversal = {
+			...original, id: 'browser-link-reversal', type: 'income', displayAmount: '11.000', note: 'Reversal of browser-link-original: windowed original',
+			isReversal: true, reversalOf: original.id, reversedAt: null,
+		};
+		let fixedWindowCalls = 0;
+		await page.route('**/entries?*', async (route) => {
+			const url = new URL(route.request().url());
+			if (url.searchParams.get('limit') === '100') fixedWindowCalls += 1;
+			return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [original], nextCursor: null }) });
+		});
+		await page.route('**/entries/browser-link-original', async (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ entry: original, relatedEntry: reversal }) }));
+		await page.route('**/entries/browser-link-reversal', async (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ entry: reversal, relatedEntry: original }) }));
+
+		await login(page);
+		await page.getByRole('link', { name: '账目' }).click();
+		await page.locator('.entry-row').filter({ hasText: 'windowed original' }).getByRole('link').click();
+		await expect(page).toHaveURL(/\/entries\/browser-link-original$/);
+		await expect(page.getByRole('link', { name: /查看冲正记录/ })).toBeVisible();
+		await page.getByRole('link', { name: /查看冲正记录/ }).click();
+		await expect(page).toHaveURL(/\/entries\/browser-link-reversal$/);
+		await expect(page.getByRole('link', { name: /查看原账目/ })).toBeVisible();
+		await page.getByRole('link', { name: /查看原账目/ }).click();
+		await expect(page).toHaveURL(/\/entries\/browser-link-original$/);
+		expect(fixedWindowCalls).toBe(0);
+	});
+
 	test('冲正发生并发冲突时显示明确反馈', async ({ page }) => {
 		const entry = {
 			id: 'browser-conflict-entry', type: 'expense', amount: '5.0000', displayAmount: '5.000', occurredAt: '2026-09-02T10:00:00.000Z',

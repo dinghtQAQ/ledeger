@@ -57,6 +57,9 @@ export const entrySchema = z
 	.openapi('Entry');
 
 export const entryResponseSchema = z.object({ entry: entrySchema }).openapi('EntryResponse');
+export const entryDetailResponseSchema = z
+	.object({ entry: entrySchema, relatedEntry: entrySchema.nullable() })
+	.openapi('EntryDetailResponse');
 export const reversalResponseSchema = z.object({ entry: entrySchema, reversal: entrySchema }).openapi('ReversalResponse');
 export const entryPageSchema = z.object({ items: z.array(entrySchema), nextCursor: z.string().nullable() }).openapi('EntryPage');
 

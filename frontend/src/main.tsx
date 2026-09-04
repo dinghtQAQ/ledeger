@@ -30,6 +30,7 @@ type Entry = {
 	updatedAt?: string;
 };
 type EntryPage = { items: Entry[]; nextCursor: string | null };
+type EntryDetailResponse = { entry: Entry; relatedEntry: Entry | null };
 
 declare global {
 	interface Window {
@@ -370,17 +371,12 @@ function EntryDetailsPage({ id }: { id: string }) {
 		setLoading(true); setError(''); setRelatedEntry(null);
 		try {
 			const [detail, categoryData] = await Promise.all([
-				api<{ entry: Entry }>(`/entries/${encodeURIComponent(id)}`),
+				api<EntryDetailResponse>(`/entries/${encodeURIComponent(id)}`),
 				api<CategoriesResponse>('/categories'),
 			]);
 			setEntry(detail.entry);
+			setRelatedEntry(detail.relatedEntry);
 			setCategories(categoryData);
-			try {
-				const list = await api<EntryPage>('/entries?limit=100&sort=occurredAt.desc');
-				setRelatedEntry(detail.entry.reversalOf ? list.items.find((item) => item.id === detail.entry.reversalOf) ?? null : list.items.find((item) => item.reversalOf === detail.entry.id) ?? null);
-			} catch {
-				setError('关联账目加载失败，详情仍可查看');
-			}
 		} catch (caught) {
 			setError(caught instanceof Error ? caught.message : '详情加载失败');
 		} finally { setLoading(false); }

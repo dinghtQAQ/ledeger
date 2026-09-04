@@ -480,6 +480,28 @@ describe('Hono worker', () => {
 		expect((await second.json<any>()).items[0].note).toBe('first');
 	});
 
+	it('returns reversal relationships from detail regardless of list pagination', async () => {
+		const created = await createEntry({ note: 'detail relationship original' }, 'detail-relationship-original');
+		const reversed = await request(`/entries/${created.body.entry.id}`, {
+			method: 'DELETE',
+			headers: { Authorization: 'Bearer test-key', Origin: 'https://example.com' },
+		});
+		expect(reversed.status).toBe(200);
+		const reversalId = (await reversed.json<any>()).reversal.id;
+
+		for (let index = 0; index < 100; index += 1) {
+			await createEntry({ note: `detail relationship filler ${index}`, occurredAt: `2026-09-03T${String(index % 24).padStart(2, '0')}:00:00Z` }, `detail-relationship-filler-${index}`);
+		}
+
+		const originalDetail = await request(`/entries/${created.body.entry.id}`, { headers: { Authorization: 'Bearer test-key' } });
+		const originalBody = await originalDetail.json<any>();
+		expect(originalBody.relatedEntry).toMatchObject({ id: reversalId, reversalOf: created.body.entry.id, isReversal: true });
+
+		const reversalDetail = await request(`/entries/${reversalId}`, { headers: { Authorization: 'Bearer test-key' } });
+		const reversalBody = await reversalDetail.json<any>();
+		expect(reversalBody.relatedEntry).toMatchObject({ id: created.body.entry.id, isReversal: false });
+	});
+
 	it('filters entries by type, coarse category, and fine category', async () => {
 		const fineResponse = await request('/categories/fine', {
 			method: 'POST',

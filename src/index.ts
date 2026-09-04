@@ -4,6 +4,7 @@ import { OpenAPIHono, createRoute } from '@hono/zod-openapi';
 import { amountToUnits, displayAmount, normalizeAmount, unitsToAmount } from './money';
 import {
 	createEntrySchema,
+	entryDetailResponseSchema,
 	entryPageSchema,
 	entryResponseSchema,
 	errorSchema,
@@ -433,7 +434,7 @@ const entryByIdRoute = createRoute({
 	security: [{ bearerAuth: [] }],
 	request: { params: idParamSchema },
 	responses: {
-		200: { description: 'Entry', content: { 'application/json': { schema: entryResponseSchema } } },
+		200: { description: 'Entry and its reversal relationship', content: { 'application/json': { schema: entryDetailResponseSchema } } },
 		403: errorResponse,
 		404: errorResponse,
 	},
@@ -973,7 +974,10 @@ registerOpenApi(entryByIdRoute, async (c: LedgerContext) => {
 	const { id } = validated<{ id: string }>(c, 'param');
 	const row = await c.env.DB.prepare('SELECT * FROM entries WHERE id = ?').bind(id).first<EntryRow>();
 	if (!row) return jsonError(c, 404, 'entry not found');
-	return c.json({ entry: toEntry(row) }, 200);
+	const relatedRow = row.reversal_of
+		? await c.env.DB.prepare('SELECT * FROM entries WHERE id = ?').bind(row.reversal_of).first<EntryRow>()
+		: await c.env.DB.prepare('SELECT * FROM entries WHERE reversal_of = ?').bind(row.id).first<EntryRow>();
+	return c.json({ entry: toEntry(row), relatedEntry: relatedRow ? toEntry(relatedRow) : null }, 200);
 });
 
 registerOpenApi(reverseEntryRoute, async (c: LedgerContext) => {
