@@ -37,6 +37,7 @@ async function createEntry(overrides: Record<string, unknown> = {}, key = crypto
 		method: 'POST',
 		headers: {
 			Authorization: 'Bearer test-key',
+			Origin: 'https://example.com',
 			'Content-Type': 'application/json',
 			'Idempotency-Key': key,
 		},
@@ -44,7 +45,8 @@ async function createEntry(overrides: Record<string, unknown> = {}, key = crypto
 			type: 'expense',
 			amount: '10.0000',
 			occurredAt: '2026-09-01T01:02:03Z',
-			category: 'food',
+			category: null,
+			categoryId: 2,
 			note: 'test',
 			...overrides,
 		}),
@@ -61,6 +63,18 @@ async function insertLegacyDueExpense(id = crypto.randomUUID()) {
 			idempotency_key, idempotency_payload, created_at, updated_at
 		) VALUES (?, 'due_expense', '100000', ?, ?, 'unpaid', 'legacy', NULL, 0, NULL, NULL, 1, NULL, NULL, ?, ?)`,
 	).bind(id, timestamp, '2026-09-30T00:00:00.000Z', timestamp, timestamp).run();
+	return id;
+}
+
+async function insertUnclassifiedExpense(id = crypto.randomUUID()) {
+	const timestamp = '2026-09-01T11:00:00.000Z';
+	await env.DB.prepare(
+		`INSERT INTO entries (
+			id, type, amount_units, occurred_at, due_at, due_status,
+			category, category_id, subcategory_id, note, is_reversal, reversal_of, reversed_at, version,
+			idempotency_key, idempotency_payload, created_at, updated_at
+		) VALUES (?, 'expense', '40000', ?, NULL, NULL, 'legacy label', NULL, NULL, NULL, 0, NULL, NULL, 1, NULL, NULL, ?, ?)`,
+	).bind(id, timestamp, timestamp, timestamp).run();
 	return id;
 }
 
@@ -176,6 +190,64 @@ describe('Hono worker', () => {
 		expect(crossOrigin.status).toBe(403);
 		vi.restoreAllMocks();
 	});
+
+	it('requires a same-origin source for bearer and cookie mutations', async () => {
+		const missingSource = await request('/entries', {
+			method: 'POST',
+			headers: {
+				Authorization: 'Bearer test-key',
+				'Content-Type': 'application/json',
+				'Idempotency-Key': 'missing-source',
+			},
+			body: JSON.stringify({ type: 'expense', amount: '1', occurredAt: '2026-09-01T00:00:00Z', categoryId: 2 }),
+		});
+		expect(missingSource.status).toBe(403);
+
+		const wrongSource = await request('/entries', {
+			method: 'POST',
+			headers: {
+				Authorization: 'Bearer test-key',
+				Origin: 'https://attacker.example',
+				'Content-Type': 'application/json',
+				'Idempotency-Key': 'wrong-source',
+			},
+			body: JSON.stringify({ type: 'expense', amount: '1', occurredAt: '2026-09-01T00:00:00Z', categoryId: 2 }),
+		});
+		expect(wrongSource.status).toBe(403);
+
+		const validReferer = await request('/entries', {
+			method: 'POST',
+			headers: {
+				Authorization: 'Bearer test-key',
+				Referer: 'https://example.com/entries/new',
+				'Content-Type': 'application/json',
+				'Idempotency-Key': 'valid-referer',
+			},
+			body: JSON.stringify({ type: 'expense', amount: '1', occurredAt: '2026-09-01T00:00:00Z', categoryId: 2 }),
+		});
+		expect(validReferer.status).toBe(201);
+
+		vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ success: true }), { status: 200 }));
+		const login = await request('/auth/login', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '10.0.0.30' },
+			body: JSON.stringify({ password: 'test-password', turnstileToken: 'token' }),
+		});
+		const cookie = login.headers.get('set-cookie')!.split(';')[0];
+		const cookieMissingSource = await request('/entries', {
+			method: 'POST',
+			headers: { Cookie: cookie, 'Content-Type': 'application/json', 'Idempotency-Key': 'cookie-missing-source' },
+			body: JSON.stringify({ type: 'expense', amount: '1', occurredAt: '2026-09-01T00:00:00Z', categoryId: 2 }),
+		});
+		expect(cookieMissingSource.status).toBe(403);
+		const cookieValidSource = await request('/entries', {
+			method: 'POST',
+			headers: { Cookie: cookie, Origin: 'https://example.com', 'Content-Type': 'application/json', 'Idempotency-Key': 'cookie-valid-source' },
+			body: JSON.stringify({ type: 'expense', amount: '1', occurredAt: '2026-09-01T00:00:00Z', categoryId: 2 }),
+		});
+		expect(cookieValidSource.status).toBe(201);
+		vi.restoreAllMocks();
+	});
 	it('responds with Hello World! from the root route', async () => {
 		const request = new IncomingRequest('http://example.com');
 		// Create an empty context to pass to `worker.fetch()`.
@@ -236,6 +308,7 @@ describe('Hono worker', () => {
 			method: 'POST',
 			headers: {
 				Authorization: 'Bearer test-key',
+				Origin: 'https://example.com',
 				'Content-Type': 'application/json',
 				'Idempotency-Key': 'create-income-1',
 			},
@@ -282,6 +355,7 @@ describe('Hono worker', () => {
 			method: 'POST',
 			headers: {
 				Authorization: 'Bearer test-key',
+				Origin: 'https://example.com',
 				'Content-Type': 'application/json',
 				'Idempotency-Key': 'idem-canonical',
 			},
@@ -290,7 +364,8 @@ describe('Hono worker', () => {
 				occurredAt: '2026-09-01T01:02:03+00:00',
 				amount: '12.34',
 				type: 'expense',
-				category: 'food',
+				category: null,
+				categoryId: 2,
 				ignored: 'field',
 			}),
 		});
@@ -482,6 +557,8 @@ describe('Hono worker', () => {
 		expect(inactive.response.status).toBe(400);
 		const missing = await createEntry({ category: null, categoryId: null }, 'missing-coarse');
 		expect(missing.response.status).toBe(400);
+		const legacyText = await createEntry({ category: 'legacy text', categoryId: null }, 'legacy-text-category');
+		expect(legacyText.response.status).toBe(400);
 		const income = await createEntry({ type: 'income', category: null, categoryId: null }, 'income-without-category');
 		expect(income.response.status).toBe(201);
 		const invalidLow = await request('/settings/ledger', { method: 'PUT', headers: { Authorization: 'Bearer test-key', Origin: 'https://example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ paydayDay: 0 }) });
@@ -503,7 +580,7 @@ describe('Hono worker', () => {
 		await createEntry({ type: 'income', amount: '1', occurredAt: '2026-08-31T16:00:00Z', category: null, categoryId: null }, 'analytics-start-boundary');
 		await createEntry({ type: 'income', amount: '2', occurredAt: '2026-09-01T16:00:00Z', category: null, categoryId: null }, 'analytics-end-boundary');
 		await createEntry({ type: 'expense', amount: '12', occurredAt: '2026-09-01T09:00:00+08:00', category: null, categoryId: 2, subcategoryId: fine.id }, 'analytics-expense');
-		await createEntry({ type: 'expense', amount: '4', occurredAt: '2026-09-01T11:00:00+08:00', category: 'legacy label', categoryId: null }, 'analytics-uncategorized');
+		await insertUnclassifiedExpense('analytics-uncategorized');
 		await createEntry({ type: 'expense', amount: '5', occurredAt: '2026-09-02T09:00:00+08:00', category: null, categoryId: 1 }, 'analytics-outside');
 		await insertLegacyDueExpense('analytics-due-expense');
 		const reversed = await createEntry({ type: 'expense', amount: '7', occurredAt: '2026-09-01T10:00:00+08:00', category: null, categoryId: 3 }, 'analytics-reversed');

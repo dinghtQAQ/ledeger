@@ -167,6 +167,10 @@ function sameOrigin(c: LedgerContext) {
 	}
 }
 
+function mutationSourceAllowed(c: LedgerContext) {
+	return Boolean(c.req.header('Origin') || c.req.header('Referer')) && sameOrigin(c);
+}
+
 function clientKey(c: LedgerContext) {
 	return c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() || 'unknown';
 }
@@ -637,8 +641,7 @@ async function protectApi(c: LedgerContext, next: () => Promise<void>) {
 	const auth = await authenticate(c);
 	if (!auth.authenticated) return jsonError(c, 403, 'forbidden') as never;
 	const mutating = !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method);
-	const hasSourceHeader = Boolean(c.req.header('Origin') || c.req.header('Referer'));
-	if (mutating && (auth.source === 'session' || hasSourceHeader) && !sameOrigin(c)) return jsonError(c, 403, 'forbidden') as never;
+	if (mutating && !mutationSourceAllowed(c)) return jsonError(c, 403, 'forbidden') as never;
 	await next();
 	c.res = renewSessionCookie(c, c.res, auth);
 }
@@ -655,8 +658,7 @@ app.use('/entries', async (c, next) => {
 	const auth = await authenticate(c);
 	if (!auth.authenticated) return jsonError(c, 403, 'forbidden');
 	const mutating = !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method);
-	const hasSourceHeader = Boolean(c.req.header('Origin') || c.req.header('Referer'));
-	if (mutating && (auth.source === 'session' || hasSourceHeader) && !sameOrigin(c)) {
+	if (mutating && !mutationSourceAllowed(c)) {
 		return jsonError(c, 403, 'forbidden');
 	}
 	await next();
@@ -839,7 +841,7 @@ registerOpenApi(createEntryRoute, async (c: LedgerContext) => {
 	const dueAt = null;
 	const categoryId = input.categoryId ?? null;
 	const subcategoryId = input.subcategoryId ?? null;
-	if (input.type === 'expense' && categoryId === null && !input.category) return jsonError(c, 400, 'expense category is required');
+	if (input.type === 'expense' && categoryId === null) return jsonError(c, 400, 'expense category is required');
 	if (subcategoryId !== null && categoryId === null) return jsonError(c, 400, 'subcategory requires a coarse category');
 	if (categoryId !== null) {
 		const coarse = await c.env.DB.prepare('SELECT id FROM coarse_categories WHERE id = ?').bind(categoryId).first();
