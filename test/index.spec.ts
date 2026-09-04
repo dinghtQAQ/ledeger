@@ -1,6 +1,17 @@
-import { env, createExecutionContext, waitOnExecutionContext, SELF } from 'cloudflare:test';
+import { env, createExecutionContext, waitOnExecutionContext, SELF, applyD1Migrations } from 'cloudflare:test';
 import { beforeAll, beforeEach, describe, it, expect, vi } from 'vitest';
 import worker from '../src/index';
+import migration0001 from '../migrations/0001_entries.sql?raw';
+import migration0002 from '../migrations/0002_amount_units_source.sql?raw';
+import migration0003 from '../migrations/0003_auth_sessions.sql?raw';
+import migration0004 from '../migrations/0004_categories_settings.sql?raw';
+
+const migrations = [
+	['0001_entries.sql', migration0001],
+	['0002_amount_units_source.sql', migration0002],
+	['0003_auth_sessions.sql', migration0003],
+	['0004_categories_settings.sql', migration0004],
+].map(([name, sql]) => ({ name, queries: sql.split(';').map((query) => query.trim()).filter(Boolean) }));
 
 // For now, you'll need to do something like this to get a correctly-typed
 // `Request` to pass to `worker.fetch()`.
@@ -55,43 +66,10 @@ async function insertLegacyDueExpense(id = crypto.randomUUID()) {
 
 describe('Hono worker', () => {
 	beforeAll(async () => {
-		await env.DB.prepare('DROP TABLE IF EXISTS entries').run();
-		await env.DB.prepare(
-			`CREATE TABLE IF NOT EXISTS entries (
-				id TEXT PRIMARY KEY,
-				type TEXT NOT NULL CHECK (type IN ('income', 'expense', 'due_expense')),
-				amount_units TEXT NOT NULL,
-				occurred_at TEXT NOT NULL,
-				due_at TEXT,
-				due_status TEXT,
-				category TEXT,
-				note TEXT,
-				is_reversal INTEGER NOT NULL DEFAULT 0 CHECK (is_reversal IN (0, 1)),
-				reversal_of TEXT UNIQUE,
-				reversed_at TEXT,
-				version INTEGER NOT NULL DEFAULT 1,
-				idempotency_key TEXT UNIQUE,
-				idempotency_payload TEXT,
-				created_at TEXT NOT NULL,
-				updated_at TEXT NOT NULL,
-				FOREIGN KEY (reversal_of) REFERENCES entries(id),
-				CHECK (
-					(type = 'due_expense' AND due_at IS NOT NULL AND due_status IN ('unpaid', 'paid', 'cancelled'))
-					OR (type != 'due_expense' AND due_at IS NULL AND due_status IS NULL)
-				)
-			)`,
-		).run();
-		await env.DB.prepare(
-			`CREATE TABLE IF NOT EXISTS auth_sessions (
-				token_hash TEXT PRIMARY KEY,
-				created_at TEXT NOT NULL,
-				expires_at TEXT NOT NULL,
-				last_seen_at TEXT NOT NULL
-			)`,
-		).run();
+		await applyD1Migrations(env.DB, migrations);
 	});
 
-	 beforeEach(async () => {
+	beforeEach(async () => {
 		await env.DB.prepare('DELETE FROM entries').run();
 		await env.DB.prepare('DELETE FROM auth_sessions').run();
 		await env.DB.prepare('DELETE FROM fine_categories').run().catch(() => undefined);
@@ -237,6 +215,20 @@ describe('Hono worker', () => {
 		const response = await SELF.fetch('https://example.com/health/db');
 		expect(response.status).toBe(200);
 		expect(await response.json()).toEqual({ status: 'ok' });
+	});
+
+	it('serves the migrated schema across repeated protected requests', async () => {
+		const firstCategories = await request('/categories', { headers: { Authorization: 'Bearer test-key' } });
+		const secondCategories = await request('/categories', { headers: { Authorization: 'Bearer test-key' } });
+		const firstSettings = await request('/settings/ledger', { headers: { Authorization: 'Bearer test-key' } });
+		const secondSettings = await request('/settings/ledger', { headers: { Authorization: 'Bearer test-key' } });
+
+		expect(firstCategories.status).toBe(200);
+		expect(secondCategories.status).toBe(200);
+		expect(await secondCategories.json()).toEqual(await firstCategories.json());
+		expect(firstSettings.status).toBe(200);
+		expect(secondSettings.status).toBe(200);
+		expect(await secondSettings.json()).toEqual(await firstSettings.json());
 	});
 
 	it('creates an income with exact four-decimal storage and three-decimal display', async () => {

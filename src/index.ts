@@ -117,42 +117,6 @@ const now = () => new Date().toISOString();
 type AuthState = { authenticated: boolean; source: 'bearer' | 'session' | 'none'; expiresAt?: string };
 type SessionRow = { token_hash: string; created_at: string; expires_at: string; last_seen_at: string };
 
-async function ensureAuthTables(db: D1Database) {
-	await db
-		.prepare(
-			`CREATE TABLE IF NOT EXISTS auth_sessions (
-				token_hash TEXT PRIMARY KEY,
-				created_at TEXT NOT NULL,
-				expires_at TEXT NOT NULL,
-				last_seen_at TEXT NOT NULL
-			)`,
-		)
-		.run();
-}
-
-async function ensureCategoryTables(db: D1Database) {
-	await db.prepare(`CREATE TABLE IF NOT EXISTS coarse_categories (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE)`).run();
-	await db.prepare(`CREATE TABLE IF NOT EXISTS fine_categories (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		name TEXT NOT NULL,
-		coarse_category_id INTEGER NOT NULL,
-		sort_order INTEGER NOT NULL DEFAULT 0,
-		is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1))
-	)`).run();
-	await db.prepare(`CREATE TABLE IF NOT EXISTS ledger_settings (
-		id INTEGER PRIMARY KEY CHECK (id = 1),
-		payday_day INTEGER NOT NULL DEFAULT 20 CHECK (payday_day BETWEEN 1 AND 28),
-		updated_at TEXT NOT NULL
-	)`).run();
-	await db.prepare(`INSERT OR IGNORE INTO coarse_categories (id, name) VALUES
-		(1, '住房'), (2, '餐饮'), (3, '交通'), (4, '公用'), (5, '健康'), (6, '娱乐'), (7, '投资')`).run();
-	await db.prepare(`INSERT OR IGNORE INTO ledger_settings (id, payday_day, updated_at) VALUES (1, 20, ?)`).bind(now()).run();
-	for (const column of ['category_id', 'subcategory_id']) {
-		try { await db.prepare(`ALTER TABLE entries ADD COLUMN ${column} INTEGER`).run(); } catch { /* already present */ }
-	}
-	await db.prepare('CREATE INDEX IF NOT EXISTS idx_fine_categories_parent_order ON fine_categories (coarse_category_id, sort_order, id)').run();
-}
-
 function base64Url(bytes: ArrayBuffer | Uint8Array) {
 	const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
 	let binary = '';
@@ -250,7 +214,6 @@ async function authenticate(c: LedgerContext): Promise<AuthState> {
 	}
 	const token = readCookie(c.req.raw, SESSION_COOKIE);
 	if (!token) return { authenticated: false, source: 'none' };
-	await ensureAuthTables(c.env.DB);
 	const tokenHash = await hashToken(token);
 	const row = await c.env.DB.prepare('SELECT * FROM auth_sessions WHERE token_hash = ?').bind(tokenHash).first<SessionRow>();
 	if (!row) return { authenticated: false, source: 'none' };
@@ -611,7 +574,6 @@ registerOpenApi(authLoginRoute, async (c: LedgerContext) => {
 		recordLoginFailure(key);
 		return jsonError(c, 401, 'authentication failed');
 	}
-	await ensureAuthTables(c.env.DB);
 	const token = base64Url(crypto.getRandomValues(new Uint8Array(32)));
 	const tokenHash = await hashToken(token);
 	const createdAt = new Date();
@@ -636,7 +598,6 @@ registerOpenApi(authLogoutRoute, async (c: LedgerContext) => {
 	}
 	const token = readCookie(c.req.raw, SESSION_COOKIE);
 	if (token) {
-		await ensureAuthTables(c.env.DB);
 		await c.env.DB.prepare('DELETE FROM auth_sessions WHERE token_hash = ?').bind(await hashToken(token)).run();
 	}
 	return withCookie(new Response(null, { status: 204 }), sessionCookie('', 0));
@@ -678,7 +639,6 @@ async function protectApi(c: LedgerContext, next: () => Promise<void>) {
 	const mutating = !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method);
 	const hasSourceHeader = Boolean(c.req.header('Origin') || c.req.header('Referer'));
 	if (mutating && (auth.source === 'session' || hasSourceHeader) && !sameOrigin(c)) return jsonError(c, 403, 'forbidden') as never;
-	await ensureCategoryTables(c.env.DB);
 	await next();
 	c.res = renewSessionCookie(c, c.res, auth);
 }
@@ -699,7 +659,6 @@ app.use('/entries', async (c, next) => {
 	if (mutating && (auth.source === 'session' || hasSourceHeader) && !sameOrigin(c)) {
 		return jsonError(c, 403, 'forbidden');
 	}
-	await ensureCategoryTables(c.env.DB);
 	await next();
 	c.res = renewSessionCookie(c, c.res, auth);
 });
