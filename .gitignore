@@ -53,10 +53,6 @@ build/Release
 node_modules/
 jspm_packages/
 
-# Local Worker secrets and production bindings
-.dev.vars
-wrangler.production.jsonc
-
 # Snowpack dependency directory (https://snowpack.dev/)
 
 web_modules/
@@ -162,15 +158,19 @@ dist
 .yarn/install-state.gz
 .pnp.\*
 
-# wrangler project
+# Local configuration and deployment files
 
 .dev.vars*
 !.dev.vars.example
 .env*
 !.env.example
+wrangler.production.jsonc
+
+# Generated build and test output
 .wrangler/
 playwright-report/
 test-results/
 
+# Local editor workspace
 .vscode/
 .scratch/
