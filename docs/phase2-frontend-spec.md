@@ -234,4 +234,4 @@ Prior art is the existing Worker request test suite; browser tests should be add
 - The period net amount is a view-specific value: selected-period income minus selected-period ordinary expense.
 - “未分类” is a display fallback for missing classification and remains visible in analysis; new expense writes cannot omit the coarse category.
 - The specification is intentionally limited to the first frontend release. Performance snapshots can be introduced later if real query measurements justify them.
-- This specification is stored locally because no issue tracker has been configured for the repository. It is intended to be the source document for subsequent implementation tickets.
+- The canonical tracker is GitHub Issues in `dinghtQAQ/ledeger`; this file remains the versioned source copy for the phase-2 specification and links from the phase tracker issue.
