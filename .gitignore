@@ -169,6 +169,8 @@ dist
 .env*
 !.env.example
 .wrangler/
+playwright-report/
+test-results/
 
 .vscode/
 .scratch/

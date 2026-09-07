@@ -112,7 +112,7 @@
 - Session lifetime is seven days with sliding renewal on authenticated use.
 - `GET /auth/session` reports authentication state and expiry; `POST /auth/logout` revokes the current session.
 - Every login requires Turnstile server-side verification. Repeated failures are rate-limited and return a generic authentication failure rather than revealing account details.
-- Mutating requests require a same-origin `Origin` or `Referer` check in addition to an authenticated session.
+- Every authenticated business mutation requires a same-origin `Origin` or `Referer` in addition to authentication, regardless of whether the caller uses a Bearer key or a Cookie session. Requests missing both headers, or whose `Origin` (when present) or fallback `Referer` is cross-origin, are rejected; when both are present, `Origin` is authoritative.
 
 ### Ledger Scope
 
