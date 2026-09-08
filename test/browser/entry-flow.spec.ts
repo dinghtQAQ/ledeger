@@ -49,9 +49,15 @@ test.describe('新增收入与普通支出', () => {
 		await login(page);
 		await openNewEntry(page);
 		await page.getByRole('button', { name: '收入' }).click();
+		await expect(page.getByLabel('粗分类')).toHaveCount(0);
+		await expect(page.getByLabel('细分类（可选）')).toHaveCount(0);
 		await page.getByLabel('金额').fill('100.0016');
 		await page.getByLabel('备注（可选）').fill('browser income');
+		const incomeRequest = page.waitForRequest((request) => request.url().endsWith('/entries') && request.method() === 'POST');
 		await page.getByRole('button', { name: '保存账目' }).click();
+		const incomePayload = JSON.parse((await incomeRequest).postData() || '{}');
+		expect(incomePayload.categoryId).toBeNull();
+		expect(incomePayload.subcategoryId).toBeNull();
 		await expect(page).toHaveURL(/\/entries$/);
 		await expect(page.getByText('browser income')).toBeVisible();
 		await expect(page.getByText('+100.002')).toBeVisible();

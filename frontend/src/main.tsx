@@ -443,6 +443,10 @@ function NewEntryPage() {
 
 	function changeType(nextType: 'income' | 'expense') {
 		setType(nextType);
+		if (nextType === 'income') {
+			setCategoryId('');
+			setSubcategoryId('');
+		}
 	}
 
 	async function submit(event: React.FormEvent<HTMLFormElement>) {
@@ -466,8 +470,8 @@ function NewEntryPage() {
 				type,
 				amount: amount.trim(),
 				occurredAt: dateTimeLocalToIso(occurredAt),
-				categoryId: categoryId ? Number(categoryId) : null,
-				subcategoryId: subcategoryId ? Number(subcategoryId) : null,
+				categoryId: type === 'expense' && categoryId ? Number(categoryId) : null,
+				subcategoryId: type === 'expense' && subcategoryId ? Number(subcategoryId) : null,
 				note: note.trim() || null,
 			};
 			const payloadKey = JSON.stringify(payload);
@@ -494,7 +498,7 @@ function NewEntryPage() {
 		<div className="form-intro"><p className="eyebrow">NEW LEDGER ENTRY</p><h2>记下一笔新账</h2><p className="muted">收入可以不选分类；普通支出需要选择粗分类，细分类可留空。</p></div>
 		<form className="entry-form" onSubmit={submit}>
 			<fieldset className="entry-type-field"><legend>类型</legend><div className="type-toggle" role="group" aria-label="账目类型"><button type="button" className={type === 'expense' ? 'selected' : ''} onClick={() => changeType('expense')}>普通支出</button><button type="button" className={type === 'income' ? 'selected' : ''} onClick={() => changeType('income')}>收入</button></div></fieldset>
-			<div className="field-grid"><div><label htmlFor="entry-category">粗分类{type === 'expense' && <span aria-hidden="true"> *</span>}</label><select id="entry-category" value={categoryId} onChange={(event) => { setCategoryId(event.target.value); setSubcategoryId(''); }}><option value="">{type === 'income' ? '不选择分类' : '请选择粗分类'}</option>{categories.coarseCategories.map((coarse) => <option key={coarse.id} value={coarse.id}>{coarse.name}</option>)}</select></div><div><label htmlFor="entry-subcategory">细分类（可选）</label><select id="entry-subcategory" value={subcategoryId} disabled={!categoryId || availableFineCategories.length === 0} onChange={(event) => setSubcategoryId(event.target.value)}><option value="">不选择细分类</option>{availableFineCategories.map((fine) => <option key={fine.id} value={fine.id}>{fine.name}</option>)}</select></div></div>
+			{type === 'expense' && <div className="field-grid"><div><label htmlFor="entry-category">粗分类<span aria-hidden="true"> *</span></label><select id="entry-category" value={categoryId} onChange={(event) => { setCategoryId(event.target.value); setSubcategoryId(''); }}><option value="">请选择粗分类</option>{categories.coarseCategories.map((coarse) => <option key={coarse.id} value={coarse.id}>{coarse.name}</option>)}</select></div><div><label htmlFor="entry-subcategory">细分类（可选）</label><select id="entry-subcategory" value={subcategoryId} disabled={!categoryId || availableFineCategories.length === 0} onChange={(event) => setSubcategoryId(event.target.value)}><option value="">不选择细分类</option>{availableFineCategories.map((fine) => <option key={fine.id} value={fine.id}>{fine.name}</option>)}</select></div></div>}
 			<div className="field-grid"><div><label htmlFor="entry-amount">金额</label><input id="entry-amount" inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="0.00" required /></div><div><label htmlFor="entry-occurred-at">发生时间</label><input id="entry-occurred-at" type="datetime-local" value={occurredAt} onChange={(event) => setOccurredAt(event.target.value)} required /></div></div>
 			<div><label htmlFor="entry-note">备注（可选）</label><textarea id="entry-note" value={note} onChange={(event) => setNote(event.target.value)} rows={3} placeholder="写点容易回想的说明" /></div>
 			{error && <p className="error" role="alert">{error}</p>}
