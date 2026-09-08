@@ -155,6 +155,20 @@ function displayEntryCategory(entry: Entry, categories: CategoriesResponse | nul
 	return coarse?.name || (entry.type === 'income' ? '未分类收入' : '未分类');
 }
 
+const pieChartColors = ['#1f5c49', '#4c9a6d', '#b7793e', '#a33c35', '#55738a', '#8064a2', '#9b8a3d'];
+
+function pieChartGradient(items: AnalyticsItem[]) {
+	const positiveItems = items.filter((item) => Number(item.amount) > 0);
+	const total = positiveItems.reduce((sum, item) => sum + Number(item.amount), 0);
+	if (!total) return '#dfe5df 0 100%';
+	let cursor = 0;
+	return positiveItems.map((item, index) => {
+		const start = cursor;
+		cursor += Number(item.amount) / total * 100;
+		return `${pieChartColors[index % pieChartColors.length]} ${start}% ${cursor}%`;
+	}).join(', ');
+}
+
 function Turnstile({ onToken }: { onToken: (token: string) => void }) {
 	const siteKey = import.meta.env.VITE_TURNSTILE_SITE_KEY;
 	const [ready, setReady] = useState(Boolean(window.turnstile));
@@ -350,7 +364,7 @@ function EntriesPage() {
 			<div className="filter-actions"><button type="submit" className="primary-button">应用筛选</button><button type="button" className="secondary-button" onClick={() => { setFrom(''); setTo(''); setType(''); setCategoryId(''); setSubcategoryId(''); setSort('occurredAt.desc'); window.setTimeout(() => void loadEntries(), 0); }}>重置</button></div>
 		</form>
 		{items.length ? <div className="entry-list">{items.map((entry) => <article className={`entry-row ${entry.isReversal ? 'reversal' : ''}`} key={entry.id}>
-			<a className="entry-main entry-link" href={`/entries/${entry.id}`} onClick={(event) => { event.preventDefault(); navigate(`/entries/${entry.id}`); }}><strong>{entryTypeLabel(entry.type)}{entry.isReversal && ' · 冲正'}</strong><span className="muted">{displayEntryCategory(entry, categories)}</span><span className="muted">{new Date(entry.occurredAt).toLocaleString('zh-CN')}</span>{entry.isReversal && <span className="reversal-label">冲正记录</span>}</a>
+			<a className="entry-main entry-link" href={`/entries/${entry.id}`} onClick={(event) => { event.preventDefault(); navigate(`/entries/${entry.id}`); }}><strong>{entryTypeLabel(entry.type)}{entry.isReversal && ' · 冲正'}</strong>{entry.type !== 'income' && <span className="muted">{displayEntryCategory(entry, categories)}</span>}<span className="muted">{new Date(entry.occurredAt).toLocaleString('zh-CN')}</span>{entry.isReversal && <span className="reversal-label">冲正记录</span>}</a>
 			<div className="entry-side"><strong className={entry.type === 'income' ? 'amount-income' : 'amount-expense'}>{entry.type === 'income' ? '+' : '-'}{entry.displayAmount}</strong>{entry.note && <span className="muted">{entry.note}</span>}{entry.reversedAt && <span className="reversal-label">已冲正</span>}{isReversibleEntry(entry) && <button type="button" className="danger-button" onClick={() => void reverse(entry)} disabled={reversingId !== null}>{reversingId === entry.id ? '处理中…' : '冲正这笔账目'}</button>}</div>
 		</article>)}</div> : <div className="empty-state"><h2>没有匹配的账目</h2><p className="muted">尝试调整筛选条件，或记录第一笔账目。</p><button type="button" className="primary-button" onClick={() => navigate('/entries/new')}>新增账目</button></div>}
 		{loadMoreError && <div className="pagination-feedback"><p className="error" role="alert">{loadMoreError}</p><button type="button" className="secondary-button" onClick={() => void loadMore()}>重试加载</button></div>}
@@ -401,7 +415,7 @@ function EntryDetailsPage({ id }: { id: string }) {
 		<div className="detail-toolbar"><button type="button" className="secondary-button" onClick={() => navigate('/entries')}>返回账目</button><span className={`detail-badge ${entry.isReversal ? 'reversal' : ''}`}>{entry.isReversal ? '冲正记录' : entry.reversedAt ? '已冲正原账目' : '原账目'}</span></div>
 		{(error || message) && <p className={error ? 'error' : 'success'} role="status">{error || message}</p>}
 		<div className="detail-panel"><div className="detail-amount"><span className="muted">{entryTypeLabel(entry.type)}</span><strong className={positive ? 'amount-income' : 'amount-expense'}>{positive ? '+' : '-'}{entry.displayAmount}</strong></div>
-			<dl className="detail-grid"><div><dt>发生时间</dt><dd>{new Date(entry.occurredAt).toLocaleString('zh-CN')}</dd></div><div><dt>粗分类</dt><dd>{displayEntryCategory(entry, categories)}</dd></div><div><dt>细分类</dt><dd>{entry.subcategoryId ? categories?.fineCategories.find((fine) => fine.id === entry.subcategoryId)?.name || `ID ${entry.subcategoryId}` : '未选择'}</dd></div><div><dt>备注</dt><dd>{entry.note || '无'}</dd></div><div><dt>记录 ID</dt><dd className="detail-id">{entry.id}</dd></div><div><dt>状态</dt><dd>{entry.isReversal ? '冲正记录' : entry.reversedAt ? '已冲正' : '有效'}</dd></div></dl>
+			<dl className="detail-grid"><div><dt>发生时间</dt><dd>{new Date(entry.occurredAt).toLocaleString('zh-CN')}</dd></div>{entry.type !== 'income' && <><div><dt>粗分类</dt><dd>{displayEntryCategory(entry, categories)}</dd></div><div><dt>细分类</dt><dd>{entry.subcategoryId ? categories?.fineCategories.find((fine) => fine.id === entry.subcategoryId)?.name || `ID ${entry.subcategoryId}` : '未选择'}</dd></div></>}<div><dt>备注</dt><dd>{entry.note || '无'}</dd></div><div><dt>记录 ID</dt><dd className="detail-id">{entry.id}</dd></div><div><dt>状态</dt><dd>{entry.isReversal ? '冲正记录' : entry.reversedAt ? '已冲正' : '有效'}</dd></div></dl>
 			{relatedEntry && <div className="relation-panel"><span className="muted">关联账目</span><a href={`/entries/${relatedEntry.id}`} onClick={(event) => { event.preventDefault(); navigate(`/entries/${relatedEntry.id}`); }}>{relatedEntry.isReversal ? '查看冲正记录' : '查看原账目'} · {relatedEntry.displayAmount}</a></div>}
 			{isReversibleEntry(entry) && <button type="button" className="danger-button" onClick={() => void reverse()} disabled={busy}>{busy ? '处理中…' : '冲正这笔账目'}</button>}
 		</div>
@@ -636,6 +650,8 @@ function AnalyticsPreview() {
 	const maxAmount = Math.max(...summary.items.map((item) => Number(item.amount)), 1);
 	const displayedEnd = shiftCalendarDate(range.end, -1);
 	const chartName = level === 'coarse' ? '粗分类支出' : '细分类支出';
+	const pieItems = summary.items.filter((item) => Number(item.amount) > 0);
+	const pieTotal = pieItems.reduce((sum, item) => sum + Number(item.amount), 0);
 	return <section className="overview">
 		<div className="analysis-range"><div><p className="eyebrow">{rangeMode === 'custom' ? 'CUSTOM DATE RANGE' : cycleOffset === 0 ? 'CURRENT WAGE CYCLE' : cycleOffset < 0 ? 'PREVIOUS WAGE CYCLE' : 'NEXT WAGE CYCLE'}</p><h2>{range.start} 至 {displayedEnd}</h2></div><span className="muted">时区：{settings.timezone}</span></div>
 		<div className="analysis-controls">
@@ -645,7 +661,7 @@ function AnalyticsPreview() {
 		<form className="analysis-custom-range" onSubmit={applyCustomRange}><div><label htmlFor="analytics-from">开始日期</label><input id="analytics-from" type="date" value={customStart} onChange={(event) => setCustomStart(event.target.value)} /></div><div><label htmlFor="analytics-to">结束日期</label><input id="analytics-to" type="date" value={customEnd} onChange={(event) => setCustomEnd(event.target.value)} /></div><button type="submit" className="secondary-button">应用范围</button></form>
 		{rangeError && <p className="error" role="alert">{rangeError}</p>}
 		<div className="summary-grid"><article><span>周期收入</span><strong className="amount-income">+{summary.periodIncome}</strong></article><article><span>普通支出</span><strong className="amount-expense">-{summary.periodExpense}</strong></article><article><span>周期净额</span><strong className={summary.periodNet.startsWith('-') ? 'amount-expense' : 'amount-income'}>{summary.periodNet}</strong></article><article><span>当前余额</span><strong>{summary.currentBalance}</strong></article></div>
-		<div className="chart-panel"><div className="section-heading"><div><p className="eyebrow">SPENDING MAP</p><h2>{chartName}</h2></div><span className="muted">金额 / 笔数</span></div><div className={`bar-chart ${level === 'fine' ? 'fine-chart' : ''}`} role="img" aria-label={`${chartName}柱状图`}>{summary.items.map((item) => <div className="bar-item" key={item.id ?? 'uncategorized'}><div className="bar-track"><div className="bar-fill" style={{ height: `${Math.max(0, Number(item.amount) / maxAmount * 100)}%` }} title={`${item.name}：${item.displayAmount}，${item.count} 笔`} /></div><strong>{item.name}</strong>{level === 'fine' && item.parentName && <span className="muted">{item.parentName}</span>}<span className="muted">{item.displayAmount} · {item.count} 笔</span></div>)}</div></div>
+		<div className="chart-panel"><div className="section-heading"><div><p className="eyebrow">SPENDING MAP</p><h2>{chartName}</h2></div><span className="muted">金额 / 笔数</span></div><div className="chart-visuals"><div className="bar-chart-wrap"><div className={`bar-chart ${level === 'fine' ? 'fine-chart' : ''}`} role="img" aria-label={`${chartName}柱状图`}>{summary.items.map((item) => <div className="bar-item" key={item.id ?? 'uncategorized'}><div className="bar-track"><div className="bar-fill" style={{ height: `${Math.max(0, Number(item.amount) / maxAmount * 100)}%` }} title={`${item.name}：${item.displayAmount}，${item.count} 笔`} /></div><strong>{item.name}</strong>{level === 'fine' && item.parentName && <span className="muted">{item.parentName}</span>}<span className="muted">{item.displayAmount} · {item.count} 笔</span></div>)}</div></div><div className="pie-chart-wrap"><div className="pie-chart" role="img" aria-label={`${chartName}饼图`} style={{ background: `conic-gradient(${pieChartGradient(summary.items)})` }} />{pieItems.length ? <div className="pie-legend">{pieItems.map((item, index) => <div className="pie-legend-item" key={item.id ?? 'uncategorized'}><span className="pie-legend-swatch" style={{ background: pieChartColors[index % pieChartColors.length] }} /><span>{item.name}</span><span className="muted">{item.displayAmount} · {pieTotal ? `${(Number(item.amount) / pieTotal * 100).toFixed(1)}%` : '0%'}</span></div>)}</div> : <p className="muted pie-empty">当前周期暂无支出</p>}</div></div></div>
 	</section>;
 }
 

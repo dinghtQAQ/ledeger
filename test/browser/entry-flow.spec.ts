@@ -27,6 +27,7 @@ test.describe('新增收入与普通支出', () => {
 		await expect(page.getByText('周期收入')).toBeVisible();
 		await expect(page.getByText('普通支出')).toBeVisible();
 		await expect(page.getByRole('img', { name: '粗分类支出柱状图' })).toBeVisible();
+		await expect(page.getByRole('img', { name: '粗分类支出饼图' })).toBeVisible();
 		await expect(page.getByText('住房')).toBeVisible();
 		await expect(page.getByText('餐饮')).toBeVisible();
 	});
@@ -54,6 +55,8 @@ test.describe('新增收入与普通支出', () => {
 		await expect(page).toHaveURL(/\/entries$/);
 		await expect(page.getByText('browser income')).toBeVisible();
 		await expect(page.getByText('+100.002')).toBeVisible();
+		const incomeRow = page.getByText('browser income').locator('..').locator('..');
+		await expect(incomeRow.locator('.entry-main .muted')).toHaveCount(1);
 	});
 
 	test('支出缺少粗分类时显示校验错误', async ({ page }) => {
