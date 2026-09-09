@@ -176,7 +176,11 @@ function pieSlicePath(startPercent: number, endPercent: number) {
 }
 
 function ChartTooltip({ item, details, level, position }: { item: AnalyticsItem; details: AnalyticsItem[]; level: 'coarse' | 'fine'; position: { x: number; y: number } }) {
-	return <div className="chart-tooltip" role="status" style={{ left: position.x, top: position.y }}>
+	const tooltipWidth = 268;
+	const tooltipHeight = 180;
+	const left = Math.max(8, Math.min(position.x + 14, window.innerWidth - tooltipWidth));
+	const top = Math.max(8, Math.min(position.y + 14, window.innerHeight - tooltipHeight));
+	return <div className="chart-tooltip" role="status" style={{ left, top }}>
 		<strong>{item.name}</strong>
 		<span>{item.displayAmount} · {item.count} 笔</span>
 		{level === 'fine' && item.parentName && <span className="muted">所属粗类：{item.parentName}</span>}

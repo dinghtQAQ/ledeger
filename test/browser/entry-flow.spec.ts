@@ -147,7 +147,17 @@ test.describe('分析层级与范围导航', () => {
 
 		await expect(page.locator('.pie-segment')).toHaveCount(3);
 		expect(await page.locator('.pie-segment').first().evaluate((element) => element.tagName.toLowerCase())).toBe('path');
-	});
+		const pieLegend = page.locator('.pie-legend-item').filter({ hasText: '娱乐' });
+		const pieBox = await pieLegend.boundingBox();
+		expect(pieBox).not.toBeNull();
+		await pieLegend.hover({ position: { x: 8, y: 8 } });
+		const firstPieTooltip = await page.locator('.pie-chart .chart-tooltip').boundingBox();
+		expect(firstPieTooltip).not.toBeNull();
+		await pieLegend.hover({ position: { x: pieBox!.width - 8, y: pieBox!.height - 8 } });
+		const secondPieTooltip = await page.locator('.pie-chart .chart-tooltip').boundingBox();
+		expect(secondPieTooltip).not.toBeNull();
+		expect(secondPieTooltip!.x).not.toBe(firstPieTooltip!.x);
+});
 
 	test('支持粗细类切换、工资周期导航和包含结束日的自定义范围', async ({ page }) => {
 		await page.clock.install({ time: new Date('2026-09-02T00:00:00Z') });
