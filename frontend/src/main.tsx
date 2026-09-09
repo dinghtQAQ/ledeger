@@ -10,7 +10,7 @@ type LedgerSettings = { paydayDay: number; timezone: string };
 type AnalyticsItem = { id: number | null; name: string; parentId?: number; parentName?: string; amount: string; displayAmount: string; count: number };
 type AnalyticsSummary = { from: string; to: string; periodIncome: string; periodExpense: string; periodNet: string; currentBalance: string; items: AnalyticsItem[] };
 type FineDraft = { id: string; name: string; coarseCategoryId: string };
-type ChartInteraction = { key: string; source: 'bar' | 'pie' };
+type ChartInteraction = { key: string; source: 'bar' | 'pie'; x: number; y: number };
 type EntryType = 'income' | 'expense' | 'due_expense';
 type Entry = {
 	id: string;
@@ -163,8 +163,20 @@ function analyticsItemKey(item: AnalyticsItem) {
 	return `${item.id ?? 'uncategorized'}:${item.name}`;
 }
 
-function ChartTooltip({ item, details, level }: { item: AnalyticsItem; details: AnalyticsItem[]; level: 'coarse' | 'fine' }) {
-	return <div className="chart-tooltip" role="status">
+function pieSlicePath(startPercent: number, endPercent: number) {
+	const radius = 31.831;
+	const startAngle = startPercent / 100 * Math.PI * 2 - Math.PI / 2;
+	const endAngle = endPercent / 100 * Math.PI * 2 - Math.PI / 2;
+	const startX = 50 + radius * Math.cos(startAngle);
+	const startY = 50 + radius * Math.sin(startAngle);
+	const endX = 50 + radius * Math.cos(endAngle);
+	const endY = 50 + radius * Math.sin(endAngle);
+	const largeArc = endPercent - startPercent > 50 ? 1 : 0;
+	return `M 50 50 L ${startX} ${startY} A ${radius} ${radius} 0 ${largeArc} 1 ${endX} ${endY} Z`;
+}
+
+function ChartTooltip({ item, details, level, position }: { item: AnalyticsItem; details: AnalyticsItem[]; level: 'coarse' | 'fine'; position: { x: number; y: number } }) {
+	return <div className="chart-tooltip" role="status" style={{ left: position.x, top: position.y }}>
 		<strong>{item.name}</strong>
 		<span>{item.displayAmount} · {item.count} 笔</span>
 		{level === 'fine' && item.parentName && <span className="muted">所属粗类：{item.parentName}</span>}
@@ -636,6 +648,13 @@ function AnalyticsPreview() {
 	const [rangeError, setRangeError] = useState('');
 	const [error, setError] = useState('');
 	const [activeChartItem, setActiveChartItem] = useState<ChartInteraction | null>(null);
+	function setChartInteraction(key: string, source: ChartInteraction['source'], x: number, y: number) {
+		setActiveChartItem({ key, source, x, y });
+	}
+	function setChartInteractionFromElement(event: React.FocusEvent<Element>, key: string, source: ChartInteraction['source']) {
+		const rect = event.currentTarget.getBoundingClientRect();
+		setChartInteraction(key, source, rect.left + rect.width / 2, rect.top + rect.height / 2);
+	}
 	useEffect(() => {
 		api<LedgerSettings>('/settings/ledger').then((nextSettings) => {
 			setSettings(nextSettings);
@@ -711,14 +730,15 @@ function AnalyticsPreview() {
 		<div className="summary-grid"><article><span>周期收入</span><strong className="amount-income">+{summary.periodIncome}</strong></article><article><span>普通支出</span><strong className="amount-expense">-{summary.periodExpense}</strong></article><article><span>周期净额</span><strong className={summary.periodNet.startsWith('-') ? 'amount-expense' : 'amount-income'}>{summary.periodNet}</strong></article><article><span>当前余额</span><strong>{summary.currentBalance}</strong></article></div>
 		<div className="chart-panel"><div className="section-heading"><div><p className="eyebrow">SPENDING MAP</p><h2>{chartName}</h2></div><span className="muted">金额 / 笔数</span></div><div className="chart-visuals"><div className="bar-chart-wrap"><div className={`bar-chart ${level === 'fine' ? 'fine-chart' : ''}`} role="img" aria-label={`${chartName}柱状图`}>{summary.items.map((item) => {
 			const itemKey = analyticsItemKey(item);
-			return <div className="bar-item chart-point" key={itemKey} role="button" tabIndex={0} aria-label={`${item.name}：${item.displayAmount}，${item.count} 笔`} onMouseEnter={() => setActiveChartItem({ key: itemKey, source: 'bar' })} onMouseLeave={() => setActiveChartItem(null)} onFocus={() => setActiveChartItem({ key: itemKey, source: 'bar' })} onBlur={() => setActiveChartItem(null)}><div className="bar-track"><div className="bar-fill" style={{ height: `${Math.max(0, Number(item.amount) / maxAmount * 100)}%` }} /></div><strong>{item.name}</strong>{level === 'fine' && item.parentName && <span className="muted">{item.parentName}</span>}<span className="muted">{item.displayAmount} · {item.count} 笔</span>{activeChartItem?.source === 'bar' && activeChartItem.key === itemKey && <ChartTooltip item={item} details={detailsFor(item)} level={level} />}</div>;
+			return <div className="bar-item chart-point" key={itemKey} role="button" tabIndex={0} aria-label={`${item.name}：${item.displayAmount}，${item.count} 笔`} onMouseEnter={(event) => setChartInteraction(itemKey, 'bar', event.clientX, event.clientY)} onMouseMove={(event) => setChartInteraction(itemKey, 'bar', event.clientX, event.clientY)} onMouseLeave={() => setActiveChartItem(null)} onFocus={(event) => setChartInteractionFromElement(event, itemKey, 'bar')} onBlur={() => setActiveChartItem(null)}><div className="bar-track"><div className="bar-fill" style={{ height: `${Math.max(0, Number(item.amount) / maxAmount * 100)}%` }} /></div><strong>{item.name}</strong>{level === 'fine' && item.parentName && <span className="muted">{item.parentName}</span>}<span className="muted">{item.displayAmount} · {item.count} 笔</span>{activeChartItem?.source === 'bar' && activeChartItem.key === itemKey && <ChartTooltip item={item} details={detailsFor(item)} level={level} position={activeChartItem} />}</div>;
 		})}</div></div><div className="pie-chart-wrap"><div className="pie-chart" role="img" aria-label={`${chartName}饼图`}><svg className="pie-chart-svg" viewBox="0 0 100 100" role="group" aria-label={`${chartName}饼图`}>{pieItems.map((item, index) => {
 			const itemKey = analyticsItemKey(item);
 			const percentage = pieTotal ? Number(item.amount) / pieTotal * 100 : 0;
 			const offset = pieCursor;
 			pieCursor += percentage;
-			return <circle key={itemKey} className="pie-segment" cx="50" cy="50" r="15.9155" pathLength="100" fill="none" stroke={pieChartColors[index % pieChartColors.length]} strokeWidth="31.831" strokeDasharray={`${percentage} ${100 - percentage}`} strokeDashoffset={-offset} transform="rotate(-90 50 50)" role="button" tabIndex={0} aria-label={`${item.name}：${item.displayAmount}，${item.count} 笔`} onMouseEnter={() => setActiveChartItem({ key: itemKey, source: 'pie' })} onMouseLeave={() => setActiveChartItem(null)} onFocus={() => setActiveChartItem({ key: itemKey, source: 'pie' })} onBlur={() => setActiveChartItem(null)} />;
-		})}</svg>{activeChartItem?.source === 'pie' && (() => { const item = pieItems.find((candidate) => analyticsItemKey(candidate) === activeChartItem.key); return item ? <ChartTooltip item={item} details={detailsFor(item)} level={level} /> : null; })()}</div>{pieItems.length ? <div className="pie-legend">{pieItems.map((item, index) => { const itemKey = analyticsItemKey(item); return <div className="pie-legend-item chart-point" key={itemKey} role="button" tabIndex={0} onMouseEnter={() => setActiveChartItem({ key: itemKey, source: 'pie' })} onMouseLeave={() => setActiveChartItem(null)} onFocus={() => setActiveChartItem({ key: itemKey, source: 'pie' })} onBlur={() => setActiveChartItem(null)}><span className="pie-legend-swatch" style={{ background: pieChartColors[index % pieChartColors.length] }} /><span>{item.name}</span><span className="muted">{item.displayAmount} · {pieTotal ? `${(Number(item.amount) / pieTotal * 100).toFixed(1)}%` : '0%'}</span></div>; })}</div> : <p className="muted pie-empty">当前周期暂无支出</p>}</div></div></div>
+			const interactionProps = { key: itemKey, className: 'pie-segment', fill: pieChartColors[index % pieChartColors.length], role: 'button' as const, tabIndex: 0, 'aria-label': `${item.name}：${item.displayAmount}，${item.count} 笔`, onMouseEnter: (event: React.MouseEvent<SVGElement>) => setChartInteraction(itemKey, 'pie', event.clientX, event.clientY), onMouseMove: (event: React.MouseEvent<SVGElement>) => setChartInteraction(itemKey, 'pie', event.clientX, event.clientY), onMouseLeave: () => setActiveChartItem(null), onFocus: (event: React.FocusEvent<Element>) => setChartInteractionFromElement(event, itemKey, 'pie'), onBlur: () => setActiveChartItem(null) };
+			return percentage >= 99.999 ? <circle {...interactionProps} cx="50" cy="50" r="31.831" /> : <path {...interactionProps} d={pieSlicePath(offset, offset + percentage)} />;
+		})}</svg>{activeChartItem?.source === 'pie' && (() => { const item = pieItems.find((candidate) => analyticsItemKey(candidate) === activeChartItem.key); return item ? <ChartTooltip item={item} details={detailsFor(item)} level={level} position={activeChartItem} /> : null; })()}</div>{pieItems.length ? <div className="pie-legend">{pieItems.map((item, index) => { const itemKey = analyticsItemKey(item); return <div className="pie-legend-item chart-point" key={itemKey} role="button" tabIndex={0} onMouseEnter={(event) => setChartInteraction(itemKey, 'pie', event.clientX, event.clientY)} onMouseMove={(event) => setChartInteraction(itemKey, 'pie', event.clientX, event.clientY)} onMouseLeave={() => setActiveChartItem(null)} onFocus={(event) => setChartInteractionFromElement(event, itemKey, 'pie')} onBlur={() => setActiveChartItem(null)}><span className="pie-legend-swatch" style={{ background: pieChartColors[index % pieChartColors.length] }} /><span>{item.name}</span><span className="muted">{item.displayAmount} · {pieTotal ? `${(Number(item.amount) / pieTotal * 100).toFixed(1)}%` : '0%'}</span></div>; })}</div> : <p className="muted pie-empty">当前周期暂无支出</p>}</div></div></div>
 	</section>;
 }
 

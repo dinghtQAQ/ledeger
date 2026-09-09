@@ -120,6 +120,35 @@ test.describe('分析层级与范围导航', () => {
 		await expect(page.locator('.pie-chart .chart-tooltip')).toContainText('午餐');
 	});
 
+	test('图表详情跟随鼠标位置，饼图扇区使用连续路径', async ({ page }) => {
+		await page.route('**/analytics/summary*', async (route) => {
+			const level = new URL(route.request().url()).searchParams.get('level');
+			const base = { from: '2026-08-20', to: '2026-09-20', periodIncome: '0.000', periodExpense: '235.980', periodNet: '-235.980', currentBalance: '-235.980' };
+			if (level === 'fine') return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...base, items: [] }) });
+			return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...base, items: [
+				{ id: 1, name: '餐饮', amount: '6', displayAmount: '6.000', count: 1 },
+				{ id: 4, name: '公用', amount: '199.470', displayAmount: '199.470', count: 1 },
+				{ id: 6, name: '娱乐', amount: '30.510', displayAmount: '30.510', count: 1 },
+			] }) });
+		});
+		await login(page);
+
+		const foodBar = page.locator('.bar-item').filter({ hasText: '餐饮' });
+		const foodBox = await foodBar.boundingBox();
+		expect(foodBox).not.toBeNull();
+		await foodBar.hover({ position: { x: 8, y: 8 } });
+		const firstTooltip = await page.locator('.bar-item .chart-tooltip').boundingBox();
+		expect(firstTooltip).not.toBeNull();
+		await foodBar.hover({ position: { x: foodBox!.width - 8, y: foodBox!.height - 8 } });
+		const secondTooltip = await page.locator('.bar-item .chart-tooltip').boundingBox();
+		expect(secondTooltip).not.toBeNull();
+		expect(secondTooltip!.x).not.toBe(firstTooltip!.x);
+		expect(secondTooltip!.y).not.toBe(firstTooltip!.y);
+
+		await expect(page.locator('.pie-segment')).toHaveCount(3);
+		expect(await page.locator('.pie-segment').first().evaluate((element) => element.tagName.toLowerCase())).toBe('path');
+	});
+
 	test('支持粗细类切换、工资周期导航和包含结束日的自定义范围', async ({ page }) => {
 		await page.clock.install({ time: new Date('2026-09-02T00:00:00Z') });
 		let settingsWrites = 0;
