@@ -9,6 +9,8 @@ type CategoriesResponse = { coarseCategories: CoarseCategory[]; fineCategories: 
 type LedgerSettings = { paydayDay: number; timezone: string };
 type AnalyticsItem = { id: number | null; name: string; parentId?: number; parentName?: string; amount: string; displayAmount: string; count: number };
 type AnalyticsSummary = { from: string; to: string; periodIncome: string; periodExpense: string; periodNet: string; currentBalance: string; items: AnalyticsItem[] };
+type FineDraft = { id: string; name: string; coarseCategoryId: string };
+type ChartInteraction = { key: string; source: 'bar' | 'pie' };
 type EntryType = 'income' | 'expense' | 'due_expense';
 type Entry = {
 	id: string;
@@ -155,18 +157,19 @@ function displayEntryCategory(entry: Entry, categories: CategoriesResponse | nul
 	return coarse?.name || (entry.type === 'income' ? '未分类收入' : '未分类');
 }
 
-const pieChartColors = ['#1f5c49', '#4c9a6d', '#b7793e', '#a33c35', '#55738a', '#8064a2', '#9b8a3d'];
+const pieChartColors = ['#355c7d', '#6c8eaa', '#d38b5d', '#c45145', '#6f9c8b', '#8b7aa8', '#b39a52'];
 
-function pieChartGradient(items: AnalyticsItem[]) {
-	const positiveItems = items.filter((item) => Number(item.amount) > 0);
-	const total = positiveItems.reduce((sum, item) => sum + Number(item.amount), 0);
-	if (!total) return '#dfe5df 0 100%';
-	let cursor = 0;
-	return positiveItems.map((item, index) => {
-		const start = cursor;
-		cursor += Number(item.amount) / total * 100;
-		return `${pieChartColors[index % pieChartColors.length]} ${start}% ${cursor}%`;
-	}).join(', ');
+function analyticsItemKey(item: AnalyticsItem) {
+	return `${item.id ?? 'uncategorized'}:${item.name}`;
+}
+
+function ChartTooltip({ item, details, level }: { item: AnalyticsItem; details: AnalyticsItem[]; level: 'coarse' | 'fine' }) {
+	return <div className="chart-tooltip" role="status">
+		<strong>{item.name}</strong>
+		<span>{item.displayAmount} · {item.count} 笔</span>
+		{level === 'fine' && item.parentName && <span className="muted">所属粗类：{item.parentName}</span>}
+		{level === 'coarse' && (details.length ? <ul>{details.map((detail) => <li key={analyticsItemKey(detail)}><span>{detail.name}</span><span>{detail.displayAmount} · {detail.count} 笔</span></li>)}</ul> : <span className="muted">暂无细类明细</span>)}
+	</div>;
 }
 
 function Turnstile({ onToken }: { onToken: (token: string) => void }) {
@@ -433,6 +436,7 @@ function NewEntryPage() {
 	const [busy, setBusy] = useState(false);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState('');
+	const [message, setMessage] = useState('');
 	const idempotencyRef = useRef<{ payload: string; key: string } | null>(null);
 
 	useEffect(() => {
@@ -451,7 +455,7 @@ function NewEntryPage() {
 
 	async function submit(event: React.FormEvent<HTMLFormElement>) {
 		event.preventDefault();
-		setError('');
+		setError(''); setMessage('');
 		if (type === 'expense' && !categoryId) {
 			setError('普通支出必须选择粗分类');
 			return;
@@ -484,7 +488,11 @@ function NewEntryPage() {
 				body: payloadKey,
 			});
 			idempotencyRef.current = null;
-			navigate('/entries');
+			setAmount('');
+			setSubcategoryId('');
+			setNote('');
+			setOccurredAt(currentDateTimeLocal());
+			setMessage('账目已保存，可以继续记下一笔');
 		} catch (caught) {
 			setError(caught instanceof Error ? caught.message : '账目创建失败');
 		} finally {
@@ -501,7 +509,7 @@ function NewEntryPage() {
 			{type === 'expense' && <div className="field-grid"><div><label htmlFor="entry-category">粗分类<span aria-hidden="true"> *</span></label><select id="entry-category" value={categoryId} onChange={(event) => { setCategoryId(event.target.value); setSubcategoryId(''); }}><option value="">请选择粗分类</option>{categories.coarseCategories.map((coarse) => <option key={coarse.id} value={coarse.id}>{coarse.name}</option>)}</select></div><div><label htmlFor="entry-subcategory">细分类（可选）</label><select id="entry-subcategory" value={subcategoryId} disabled={!categoryId || availableFineCategories.length === 0} onChange={(event) => setSubcategoryId(event.target.value)}><option value="">不选择细分类</option>{availableFineCategories.map((fine) => <option key={fine.id} value={fine.id}>{fine.name}</option>)}</select></div></div>}
 			<div className="field-grid"><div><label htmlFor="entry-amount">金额</label><input id="entry-amount" inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="0.00" required /></div><div><label htmlFor="entry-occurred-at">发生时间</label><input id="entry-occurred-at" type="datetime-local" value={occurredAt} onChange={(event) => setOccurredAt(event.target.value)} required /></div></div>
 			<div><label htmlFor="entry-note">备注（可选）</label><textarea id="entry-note" value={note} onChange={(event) => setNote(event.target.value)} rows={3} placeholder="写点容易回想的说明" /></div>
-			{error && <p className="error" role="alert">{error}</p>}
+			{(error || message) && <p className={error ? 'error' : 'success'} role={error ? 'alert' : 'status'}>{error || message}</p>}
 			<div className="form-actions"><button type="button" className="secondary-button" onClick={() => navigate('/entries')}>取消</button><button type="submit" className="primary-button" disabled={busy}>{busy ? '保存中…' : '保存账目'}</button></div>
 		</form>
 	</section>;
@@ -511,8 +519,7 @@ function SettingsPage() {
 	const [categories, setCategories] = useState<CategoriesResponse | null>(null);
 	const [settings, setSettings] = useState<LedgerSettings | null>(null);
 	const [paydayDay, setPaydayDay] = useState('20');
-	const [newName, setNewName] = useState('');
-	const [newParent, setNewParent] = useState('1');
+	const [fineDrafts, setFineDrafts] = useState<FineDraft[]>([{ id: createIdempotencyKey(), name: '', coarseCategoryId: '1' }]);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState('');
 	const [message, setMessage] = useState('');
@@ -525,7 +532,7 @@ function SettingsPage() {
 		setCategories(nextCategories);
 		setSettings(nextSettings);
 		setPaydayDay(String(nextSettings.paydayDay));
-		if (!newParent && nextCategories.coarseCategories[0]) setNewParent(String(nextCategories.coarseCategories[0].id));
+		setFineDrafts((current) => current.map((draft) => ({ ...draft, coarseCategoryId: draft.coarseCategoryId || String(nextCategories.coarseCategories[0]?.id ?? '') })));
 	}
 
 	useEffect(() => {
@@ -542,13 +549,27 @@ function SettingsPage() {
 		finally { setBusy(false); }
 	}
 
+	function addFineDraft() {
+		setFineDrafts((current) => [...current, { id: createIdempotencyKey(), name: '', coarseCategoryId: String(categories?.coarseCategories[0]?.id ?? '') }]);
+	}
+
+	function updateFineDraft(id: string, patch: Partial<Omit<FineDraft, 'id'>>) {
+		setFineDrafts((current) => current.map((draft) => draft.id === id ? { ...draft, ...patch } : draft));
+	}
+
 	async function createFine(event: React.FormEvent<HTMLFormElement>) {
 		event.preventDefault();
-		if (!newName.trim()) return;
+		const drafts = fineDrafts.map((draft) => ({ ...draft, name: draft.name.trim() }));
+		if (drafts.some((draft) => !draft.name || !draft.coarseCategoryId)) {
+			setError('请填写每一行的细类名称并选择所属粗类');
+			return;
+		}
 		setBusy(true); setError(''); setMessage('');
 		try {
-			await api<FineCategory>('/categories/fine', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: newName, coarseCategoryId: Number(newParent) }) });
-			setNewName(''); setMessage('细类已新增'); await reload();
+			for (const draft of drafts) {
+				await api<FineCategory>('/categories/fine', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: draft.name, coarseCategoryId: Number(draft.coarseCategoryId) }) });
+			}
+			setFineDrafts([{ id: createIdempotencyKey(), name: '', coarseCategoryId: String(categories?.coarseCategories[0]?.id ?? '') }]); setMessage(`${drafts.length} 个细类已新增`); await reload();
 		} catch (caught) { setError(caught instanceof Error ? caught.message : '新增失败'); }
 		finally { setBusy(false); }
 	}
@@ -589,9 +610,13 @@ function SettingsPage() {
 		<section className="settings-section fine-section">
 			<div className="section-heading"><div><p className="eyebrow">FINE CATEGORIES</p><h2>细类管理</h2></div><span className="muted">停用后不可用于新账目</span></div>
 			<form className="fine-create" onSubmit={createFine}>
-				<label htmlFor="fine-name">名称</label><input id="fine-name" value={newName} onChange={(event) => setNewName(event.target.value)} placeholder="例如：房租" required />
-				<label htmlFor="fine-parent">所属粗类</label><select id="fine-parent" value={newParent} onChange={(event) => setNewParent(event.target.value)}>{categories.coarseCategories.map((coarse) => <option key={coarse.id} value={coarse.id}>{coarse.name}</option>)}</select>
-				<button type="submit" disabled={busy}>新增细类</button>
+				<div className="fine-create-heading"><span>名称</span><span>所属粗类</span><span className="sr-only">操作</span></div>
+				{fineDrafts.map((draft, index) => <div className="fine-draft-row" key={draft.id}>
+					<input aria-label={`名称${index + 1}`} value={draft.name} onChange={(event) => updateFineDraft(draft.id, { name: event.target.value })} placeholder="例如：房租" />
+					<select aria-label={`所属粗类${index + 1}`} value={draft.coarseCategoryId} onChange={(event) => updateFineDraft(draft.id, { coarseCategoryId: event.target.value })}>{categories.coarseCategories.map((coarse) => <option key={coarse.id} value={coarse.id}>{coarse.name}</option>)}</select>
+					<button type="button" className="icon-button" aria-label={`删除第 ${index + 1} 行`} title="删除这一行" disabled={fineDrafts.length === 1 || busy} onClick={() => setFineDrafts((current) => current.filter((item) => item.id !== draft.id))}>×</button>
+				</div>)}
+				<div className="fine-create-actions"><button type="button" className="secondary-button" onClick={addFineDraft} disabled={busy}>＋ 添加一行</button><button type="submit" className="primary-button" disabled={busy}>新增细类</button></div>
 			</form>
 			<div className="fine-list">{categories.coarseCategories.map((coarse) => <div className="fine-group" key={coarse.id}><h3>{coarse.name}</h3>{categories.fineCategories.filter((fine) => fine.coarseCategoryId === coarse.id).map((fine, index, siblings) => <div className={`fine-row ${fine.isActive ? '' : 'inactive'}`} key={fine.id}><span className="fine-name">{fine.name}{!fine.isActive && <em>已停用</em>}</span><span className="fine-actions"><button type="button" title="上移" aria-label={`${fine.name} 上移`} disabled={busy || index === 0} onClick={() => updateFine(fine, { sortOrder: siblings[index - 1].sortOrder - 1 })}>↑</button><button type="button" title="下移" aria-label={`${fine.name} 下移`} disabled={busy || index === siblings.length - 1} onClick={() => updateFine(fine, { sortOrder: siblings[index + 1].sortOrder + 1 })}>↓</button><button type="button" onClick={() => { const name = window.prompt('新的细类名称', fine.name); if (name?.trim()) void updateFine(fine, { name: name.trim() }); }}>改名</button>{fine.isActive && <button type="button" onClick={() => void disableFine(fine)}>停用</button>}</span></div>)}</div>)}</div>
 		</section>
@@ -601,6 +626,7 @@ function SettingsPage() {
 function AnalyticsPreview() {
 	const [settings, setSettings] = useState<LedgerSettings | null>(null);
 	const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
+	const [fineSummary, setFineSummary] = useState<AnalyticsSummary | null>(null);
 	const [range, setRange] = useState<{ start: string; end: string } | null>(null);
 	const [level, setLevel] = useState<'coarse' | 'fine'>('coarse');
 	const [cycleOffset, setCycleOffset] = useState(0);
@@ -609,6 +635,7 @@ function AnalyticsPreview() {
 	const [customEnd, setCustomEnd] = useState('');
 	const [rangeError, setRangeError] = useState('');
 	const [error, setError] = useState('');
+	const [activeChartItem, setActiveChartItem] = useState<ChartInteraction | null>(null);
 	useEffect(() => {
 		api<LedgerSettings>('/settings/ledger').then((nextSettings) => {
 			setSettings(nextSettings);
@@ -618,9 +645,14 @@ function AnalyticsPreview() {
 	useEffect(() => {
 		if (!range) return;
 		setSummary(null);
+		setFineSummary(null);
+		setActiveChartItem(null);
 		setError('');
-		api<AnalyticsSummary>(`/analytics/summary?from=${range.start}&to=${range.end}&level=${level}`)
-			.then(setSummary)
+		Promise.all([
+			api<AnalyticsSummary>(`/analytics/summary?from=${range.start}&to=${range.end}&level=${level}`),
+			level === 'coarse' ? api<AnalyticsSummary>(`/analytics/summary?from=${range.start}&to=${range.end}&level=fine`) : Promise.resolve(null),
+		])
+			.then(([nextSummary, nextFineSummary]) => { setSummary(nextSummary); setFineSummary(nextFineSummary); })
 			.catch((caught) => setError(caught instanceof Error ? caught.message : '分析加载失败'));
 	}, [range, level]);
 
@@ -648,6 +680,16 @@ function AnalyticsPreview() {
 		setRangeMode('custom');
 		setRange({ start: customStart, end: nextCalendarDate(customEnd) });
 	}
+	const fineDetailsByParent = useMemo(() => {
+		const result = new Map<number, AnalyticsItem[]>();
+		for (const item of fineSummary?.items ?? []) {
+			if (item.parentId === undefined || Number(item.amount) <= 0) continue;
+			const current = result.get(item.parentId) ?? [];
+			current.push(item);
+			result.set(item.parentId, current);
+		}
+		return result;
+	}, [fineSummary]);
 
 	if (error) return <section className="empty-state"><p className="error" role="alert">{error}</p><button type="button" onClick={() => window.location.reload()}>重试</button></section>;
 	if (!settings || !range || !summary) return <section className="empty-state"><p>正在加载分析…</p></section>;
@@ -656,6 +698,8 @@ function AnalyticsPreview() {
 	const chartName = level === 'coarse' ? '粗分类支出' : '细分类支出';
 	const pieItems = summary.items.filter((item) => Number(item.amount) > 0);
 	const pieTotal = pieItems.reduce((sum, item) => sum + Number(item.amount), 0);
+	const detailsFor = (item: AnalyticsItem) => item.id === null ? [] : fineDetailsByParent.get(item.id) ?? [];
+	let pieCursor = 0;
 	return <section className="overview">
 		<div className="analysis-range"><div><p className="eyebrow">{rangeMode === 'custom' ? 'CUSTOM DATE RANGE' : cycleOffset === 0 ? 'CURRENT WAGE CYCLE' : cycleOffset < 0 ? 'PREVIOUS WAGE CYCLE' : 'NEXT WAGE CYCLE'}</p><h2>{range.start} 至 {displayedEnd}</h2></div><span className="muted">时区：{settings.timezone}</span></div>
 		<div className="analysis-controls">
@@ -665,7 +709,16 @@ function AnalyticsPreview() {
 		<form className="analysis-custom-range" onSubmit={applyCustomRange}><div><label htmlFor="analytics-from">开始日期</label><input id="analytics-from" type="date" value={customStart} onChange={(event) => setCustomStart(event.target.value)} /></div><div><label htmlFor="analytics-to">结束日期</label><input id="analytics-to" type="date" value={customEnd} onChange={(event) => setCustomEnd(event.target.value)} /></div><button type="submit" className="secondary-button">应用范围</button></form>
 		{rangeError && <p className="error" role="alert">{rangeError}</p>}
 		<div className="summary-grid"><article><span>周期收入</span><strong className="amount-income">+{summary.periodIncome}</strong></article><article><span>普通支出</span><strong className="amount-expense">-{summary.periodExpense}</strong></article><article><span>周期净额</span><strong className={summary.periodNet.startsWith('-') ? 'amount-expense' : 'amount-income'}>{summary.periodNet}</strong></article><article><span>当前余额</span><strong>{summary.currentBalance}</strong></article></div>
-		<div className="chart-panel"><div className="section-heading"><div><p className="eyebrow">SPENDING MAP</p><h2>{chartName}</h2></div><span className="muted">金额 / 笔数</span></div><div className="chart-visuals"><div className="bar-chart-wrap"><div className={`bar-chart ${level === 'fine' ? 'fine-chart' : ''}`} role="img" aria-label={`${chartName}柱状图`}>{summary.items.map((item) => <div className="bar-item" key={item.id ?? 'uncategorized'}><div className="bar-track"><div className="bar-fill" style={{ height: `${Math.max(0, Number(item.amount) / maxAmount * 100)}%` }} title={`${item.name}：${item.displayAmount}，${item.count} 笔`} /></div><strong>{item.name}</strong>{level === 'fine' && item.parentName && <span className="muted">{item.parentName}</span>}<span className="muted">{item.displayAmount} · {item.count} 笔</span></div>)}</div></div><div className="pie-chart-wrap"><div className="pie-chart" role="img" aria-label={`${chartName}饼图`} style={{ background: `conic-gradient(${pieChartGradient(summary.items)})` }} />{pieItems.length ? <div className="pie-legend">{pieItems.map((item, index) => <div className="pie-legend-item" key={item.id ?? 'uncategorized'}><span className="pie-legend-swatch" style={{ background: pieChartColors[index % pieChartColors.length] }} /><span>{item.name}</span><span className="muted">{item.displayAmount} · {pieTotal ? `${(Number(item.amount) / pieTotal * 100).toFixed(1)}%` : '0%'}</span></div>)}</div> : <p className="muted pie-empty">当前周期暂无支出</p>}</div></div></div>
+		<div className="chart-panel"><div className="section-heading"><div><p className="eyebrow">SPENDING MAP</p><h2>{chartName}</h2></div><span className="muted">金额 / 笔数</span></div><div className="chart-visuals"><div className="bar-chart-wrap"><div className={`bar-chart ${level === 'fine' ? 'fine-chart' : ''}`} role="img" aria-label={`${chartName}柱状图`}>{summary.items.map((item) => {
+			const itemKey = analyticsItemKey(item);
+			return <div className="bar-item chart-point" key={itemKey} role="button" tabIndex={0} aria-label={`${item.name}：${item.displayAmount}，${item.count} 笔`} onMouseEnter={() => setActiveChartItem({ key: itemKey, source: 'bar' })} onMouseLeave={() => setActiveChartItem(null)} onFocus={() => setActiveChartItem({ key: itemKey, source: 'bar' })} onBlur={() => setActiveChartItem(null)}><div className="bar-track"><div className="bar-fill" style={{ height: `${Math.max(0, Number(item.amount) / maxAmount * 100)}%` }} /></div><strong>{item.name}</strong>{level === 'fine' && item.parentName && <span className="muted">{item.parentName}</span>}<span className="muted">{item.displayAmount} · {item.count} 笔</span>{activeChartItem?.source === 'bar' && activeChartItem.key === itemKey && <ChartTooltip item={item} details={detailsFor(item)} level={level} />}</div>;
+		})}</div></div><div className="pie-chart-wrap"><div className="pie-chart" role="img" aria-label={`${chartName}饼图`}><svg className="pie-chart-svg" viewBox="0 0 100 100" role="group" aria-label={`${chartName}饼图`}>{pieItems.map((item, index) => {
+			const itemKey = analyticsItemKey(item);
+			const percentage = pieTotal ? Number(item.amount) / pieTotal * 100 : 0;
+			const offset = pieCursor;
+			pieCursor += percentage;
+			return <circle key={itemKey} className="pie-segment" cx="50" cy="50" r="15.9155" pathLength="100" fill="none" stroke={pieChartColors[index % pieChartColors.length]} strokeWidth="31.831" strokeDasharray={`${percentage} ${100 - percentage}`} strokeDashoffset={-offset} transform="rotate(-90 50 50)" role="button" tabIndex={0} aria-label={`${item.name}：${item.displayAmount}，${item.count} 笔`} onMouseEnter={() => setActiveChartItem({ key: itemKey, source: 'pie' })} onMouseLeave={() => setActiveChartItem(null)} onFocus={() => setActiveChartItem({ key: itemKey, source: 'pie' })} onBlur={() => setActiveChartItem(null)} />;
+		})}</svg>{activeChartItem?.source === 'pie' && (() => { const item = pieItems.find((candidate) => analyticsItemKey(candidate) === activeChartItem.key); return item ? <ChartTooltip item={item} details={detailsFor(item)} level={level} /> : null; })()}</div>{pieItems.length ? <div className="pie-legend">{pieItems.map((item, index) => { const itemKey = analyticsItemKey(item); return <div className="pie-legend-item chart-point" key={itemKey} role="button" tabIndex={0} onMouseEnter={() => setActiveChartItem({ key: itemKey, source: 'pie' })} onMouseLeave={() => setActiveChartItem(null)} onFocus={() => setActiveChartItem({ key: itemKey, source: 'pie' })} onBlur={() => setActiveChartItem(null)}><span className="pie-legend-swatch" style={{ background: pieChartColors[index % pieChartColors.length] }} /><span>{item.name}</span><span className="muted">{item.displayAmount} · {pieTotal ? `${(Number(item.amount) / pieTotal * 100).toFixed(1)}%` : '0%'}</span></div>; })}</div> : <p className="muted pie-empty">当前周期暂无支出</p>}</div></div></div>
 	</section>;
 }
 

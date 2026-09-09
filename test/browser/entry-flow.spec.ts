@@ -32,7 +32,7 @@ test.describe('新增收入与普通支出', () => {
 		await expect(page.getByText('餐饮')).toBeVisible();
 	});
 
-	test('创建普通支出后在账目列表可见', async ({ page }) => {
+	test('创建普通支出后留在新增页面并清空可重复输入', async ({ page }) => {
 		await login(page);
 		await openNewEntry(page);
 		await expect(page.getByRole('heading', { name: '新增记账' })).toBeVisible();
@@ -40,9 +40,10 @@ test.describe('新增收入与普通支出', () => {
 		await page.getByLabel('金额').fill('12.3456');
 		await page.getByLabel('备注（可选）').fill('browser expense');
 		await page.getByRole('button', { name: '保存账目' }).click();
-		await expect(page).toHaveURL(/\/entries$/);
-		await expect(page.getByText('browser expense')).toBeVisible();
-		await expect(page.getByText('-12.346')).toBeVisible();
+		await expect(page).toHaveURL(/\/entries\/new$/);
+		await expect(page.getByRole('status')).toHaveText('账目已保存，可以继续记下一笔');
+		await expect(page.getByLabel('金额')).toHaveValue('');
+		await expect(page.getByLabel('备注（可选）')).toHaveValue('');
 	});
 
 	test('收入可以不选择分类并成功创建', async ({ page }) => {
@@ -58,11 +59,9 @@ test.describe('新增收入与普通支出', () => {
 		const incomePayload = JSON.parse((await incomeRequest).postData() || '{}');
 		expect(incomePayload.categoryId).toBeNull();
 		expect(incomePayload.subcategoryId).toBeNull();
-		await expect(page).toHaveURL(/\/entries$/);
-		await expect(page.getByText('browser income')).toBeVisible();
-		await expect(page.getByText('+100.002')).toBeVisible();
-		const incomeRow = page.getByText('browser income').locator('..').locator('..');
-		await expect(incomeRow.locator('.entry-main .muted')).toHaveCount(1);
+		await expect(page).toHaveURL(/\/entries\/new$/);
+		await expect(page.getByRole('status')).toHaveText('账目已保存，可以继续记下一笔');
+		await expect(page.getByLabel('金额')).toHaveValue('');
 	});
 
 	test('支出缺少粗分类时显示校验错误', async ({ page }) => {
@@ -97,14 +96,30 @@ test.describe('新增收入与普通支出', () => {
 		await page.getByRole('button', { name: '保存账目' }).click();
 		await expect(page.getByRole('alert')).toHaveText('temporary failure');
 		await page.getByRole('button', { name: '保存账目' }).click();
-		await expect(page).toHaveURL(/\/entries$/);
-		await expect(page.getByText('browser retry')).toHaveCount(1);
-		await expect(page.getByText('-8.000')).toHaveCount(1);
+		await expect(page).toHaveURL(/\/entries\/new$/);
+		await expect(page.getByRole('status')).toHaveText('账目已保存，可以继续记下一笔');
 		expect(postCount).toBe(2);
 	});
 });
 
 test.describe('分析层级与范围导航', () => {
+	test('粗类柱体和饼图悬停时显示细类明细', async ({ page }) => {
+		await page.route('**/analytics/summary*', async (route) => {
+			const level = new URL(route.request().url()).searchParams.get('level');
+			const base = { from: '2026-08-20', to: '2026-09-20', periodIncome: '0.000', periodExpense: '12.000', periodNet: '-12.000', currentBalance: '-12.000' };
+			if (level === 'fine') {
+				return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...base, items: [{ id: 21, name: '午餐', parentId: 2, parentName: '餐饮', amount: '12', displayAmount: '12.000', count: 1 }] }) });
+			}
+			return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...base, items: [{ id: 2, name: '餐饮', amount: '12', displayAmount: '12.000', count: 1 }] }) });
+		});
+		await login(page);
+		const foodBar = page.locator('.bar-item').filter({ hasText: '餐饮' });
+		await foodBar.hover();
+		await expect(foodBar.locator('.chart-tooltip')).toContainText('午餐');
+		await page.locator('.pie-segment').first().hover();
+		await expect(page.locator('.pie-chart .chart-tooltip')).toContainText('午餐');
+	});
+
 	test('支持粗细类切换、工资周期导航和包含结束日的自定义范围', async ({ page }) => {
 		await page.clock.install({ time: new Date('2026-09-02T00:00:00Z') });
 		let settingsWrites = 0;
@@ -181,6 +196,8 @@ test.describe('账目列表与详情', () => {
 		await page.getByLabel('金额').fill('7.25');
 		await page.getByLabel('备注（可选）').fill(note);
 		await page.getByRole('button', { name: '保存账目' }).click();
+		await expect(page).toHaveURL(/\/entries\/new$/);
+		await page.getByRole('link', { name: '账目' }).click();
 		await expect(page).toHaveURL(/\/entries$/);
 		const originalRow = page.locator('.entry-row').filter({ has: page.getByText(note, { exact: true }) });
 		await expect(originalRow).toContainText('支出');
@@ -231,6 +248,8 @@ test.describe('账目列表与详情', () => {
 		await page.getByLabel('金额').fill('9');
 		await page.getByLabel('备注（可选）').fill(note);
 		await page.getByRole('button', { name: '保存账目' }).click();
+		await expect(page).toHaveURL(/\/entries\/new$/);
+		await page.getByRole('link', { name: '账目' }).click();
 		await expect(page).toHaveURL(/\/entries$/);
 		await page.locator('.entry-row').filter({ has: page.getByText(note, { exact: true }) }).getByRole('link').click();
 		await expect(page.getByRole('button', { name: '冲正这笔账目' })).toBeVisible();
@@ -341,14 +360,14 @@ test.describe('发布边界与设置', () => {
 		const firstName = `浏览器细类一-${suffix}`;
 		const secondName = `浏览器细类二-${suffix}`;
 		const renamedName = `浏览器细类改名-${suffix}`;
-		const create = async (name: string) => {
-			await page.getByLabel('名称').fill(name);
-			await page.getByLabel('所属粗类').selectOption('2');
-			await page.getByRole('button', { name: '新增细类' }).click();
-			await expect(page.getByText(name, { exact: true })).toBeVisible();
-		};
-		await create(firstName);
-		await create(secondName);
+		await page.getByLabel('名称1').fill(firstName);
+		await page.getByLabel('所属粗类1').selectOption('2');
+		await page.getByRole('button', { name: '＋ 添加一行' }).click();
+		await page.getByLabel('名称2').fill(secondName);
+		await page.getByLabel('所属粗类2').selectOption('2');
+		await page.getByRole('button', { name: '新增细类' }).click();
+		await expect(page.getByText(firstName, { exact: true })).toBeVisible();
+		await expect(page.getByText(secondName, { exact: true })).toBeVisible();
 
 		const secondRow = page.locator('.fine-row').filter({ hasText: secondName });
 		await secondRow.getByRole('button', { name: `${secondName} 上移` }).click();
