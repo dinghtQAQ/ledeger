@@ -354,6 +354,52 @@ test.describe('账目列表与详情', () => {
 });
 
 test.describe('发布边界与设置', () => {
+	test('登录认证失败时显示认证错误而不是会话过期', async ({ page }) => {
+		await page.route('**/auth/login', async (route) => {
+			await route.fulfill({
+				status: 401,
+				contentType: 'application/json',
+				body: JSON.stringify({ error: { message: 'authentication failed' } }),
+			});
+		});
+		await page.addInitScript(() => {
+			(globalThis as typeof globalThis & { __TURNSTILE_TOKEN__?: string }).__TURNSTILE_TOKEN__ = 'browser-test-token';
+		});
+		await page.route('https://challenges.cloudflare.com/**', (route) => route.abort());
+		await page.goto('/login');
+		await page.getByLabel('密码').fill('wrong-password');
+		await page.getByRole('button', { name: '登录' }).click();
+		await expect(page).toHaveURL(/\/login$/);
+		await expect(page.getByRole('alert')).toHaveText('authentication failed');
+	});
+
+	test('登录失败后重置 Turnstile 验证', async ({ page }) => {
+		await page.route('**/auth/login', async (route) => {
+			await route.fulfill({
+				status: 401,
+				contentType: 'application/json',
+				body: JSON.stringify({ error: { message: 'authentication failed' } }),
+			});
+		});
+		await page.addInitScript(() => {
+			let resetCount = 0;
+			(globalThis as typeof globalThis & {
+				__TURNSTILE_TOKEN__?: string;
+				__TURNSTILE_RESET_COUNT__?: () => number;
+				turnstile?: { render: () => string; reset: () => void };
+			}).__TURNSTILE_TOKEN__ = 'browser-test-token';
+			(globalThis as typeof globalThis & { __TURNSTILE_RESET_COUNT__?: () => number }).__TURNSTILE_RESET_COUNT__ = () => resetCount;
+			(globalThis as typeof globalThis & { turnstile?: { render: () => string; reset: () => void } }).turnstile = {
+				render: () => 'browser-test-widget',
+				reset: () => { resetCount += 1; },
+			};
+		});
+		await page.goto('/login');
+		await page.getByLabel('密码').fill('wrong-password');
+		await page.getByRole('button', { name: '登录' }).click();
+		await expect.poll(() => page.evaluate(() => (globalThis as typeof globalThis & { __TURNSTILE_RESET_COUNT__?: () => number }).__TURNSTILE_RESET_COUNT__?.())).toBe(1);
+	});
+
 	test('分析、账目和设置路径都由同一 Worker 返回 SPA shell', async ({ page }) => {
 		for (const pathname of ['/analytics', '/entries', '/settings']) {
 			const response = await page.request.get(pathname, { headers: { Accept: 'text/html' } });

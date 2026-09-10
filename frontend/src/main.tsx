@@ -37,7 +37,8 @@ type EntryDetailResponse = { entry: Entry; relatedEntry: Entry | null };
 declare global {
 	interface Window {
 		turnstile?: {
-			render: (element: HTMLElement, options: { sitekey: string; callback: (token: string) => void; 'expired-callback'?: () => void }) => void;
+			render: (element: HTMLElement, options: { sitekey: string; callback: (token: string) => void; 'expired-callback'?: () => void }) => string;
+			reset?: (widgetId?: string) => void;
 		};
 		__TURNSTILE_TOKEN__?: string;
 	}
@@ -45,7 +46,7 @@ declare global {
 
 async function api<T>(path: string, init: RequestInit = {}) {
 	const response = await fetch(path, { ...init, credentials: 'same-origin', headers: { Accept: 'application/json', ...init.headers } });
-	if (response.status === 401 || response.status === 403) {
+	if (path !== '/auth/login' && (response.status === 401 || response.status === 403)) {
 		window.dispatchEvent(new Event('session-expired'));
 		throw new Error('session expired');
 	}
@@ -188,9 +189,10 @@ function ChartTooltip({ item, details, level, position }: { item: AnalyticsItem;
 	</div>;
 }
 
-function Turnstile({ onToken }: { onToken: (token: string) => void }) {
+function Turnstile({ onToken, resetSignal }: { onToken: (token: string) => void; resetSignal: number }) {
 	const siteKey = import.meta.env.VITE_TURNSTILE_SITE_KEY;
 	const [ready, setReady] = useState(Boolean(window.turnstile));
+	const widgetId = useRef<string | null>(null);
 	useEffect(() => {
 		if (window.turnstile) {
 			setReady(true);
@@ -207,19 +209,25 @@ function Turnstile({ onToken }: { onToken: (token: string) => void }) {
 		const target = document.querySelector<HTMLElement>('[data-turnstile]');
 		if (ready && target && window.turnstile && !target.dataset.rendered) {
 			target.dataset.rendered = 'true';
-			window.turnstile.render(target, {
+			widgetId.current = window.turnstile.render(target, {
 				sitekey: siteKey,
 				callback: onToken,
 				'expired-callback': () => onToken(''),
 			});
 		}
 	}, [onToken, ready, siteKey]);
+	useEffect(() => {
+		if (!resetSignal) return;
+		onToken('');
+		if (widgetId.current !== null) window.turnstile?.reset?.(widgetId.current);
+	}, [onToken, resetSignal]);
 	return <div className="turnstile" data-turnstile aria-label="Turnstile 人机验证">{!ready && '正在加载验证…'}</div>;
 }
 
 function LoginPage({ onLogin }: { onLogin: (session: Session) => void }) {
 	const [password, setPassword] = useState('');
 	const [turnstileToken, setTurnstileToken] = useState(window.__TURNSTILE_TOKEN__ || '');
+	const [turnstileResetSignal, setTurnstileResetSignal] = useState(0);
 	const [error, setError] = useState('');
 	const [busy, setBusy] = useState(false);
 	const tokenHandler = useMemo(() => (token: string) => setTurnstileToken(token), []);
@@ -239,6 +247,7 @@ function LoginPage({ onLogin }: { onLogin: (session: Session) => void }) {
 			});
 			onLogin(session);
 		} catch (caught) {
+			setTurnstileResetSignal((signal) => signal + 1);
 			setError(caught instanceof Error ? caught.message : '登录失败');
 		} finally {
 			setBusy(false);
@@ -253,7 +262,7 @@ function LoginPage({ onLogin }: { onLogin: (session: Session) => void }) {
 				<form onSubmit={submit}>
 					<label htmlFor="password">密码</label>
 					<input id="password" name="password" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required autoFocus />
-					<Turnstile onToken={tokenHandler} />
+					<Turnstile onToken={tokenHandler} resetSignal={turnstileResetSignal} />
 					{error && <p className="error" role="alert">{error}</p>}
 					<button type="submit" disabled={busy}>{busy ? '登录中…' : '登录'}</button>
 				</form>
