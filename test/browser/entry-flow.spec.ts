@@ -54,9 +54,9 @@ test.describe('新增收入与普通支出', () => {
 		await expect(page.getByLabel('细分类（可选）')).toHaveCount(0);
 		await page.getByLabel('金额').fill('100.0016');
 		await page.getByLabel('备注（可选）').fill('browser income');
-		const incomeRequest = page.waitForRequest((request) => request.url().endsWith('/entries') && request.method() === 'POST');
+		const incomeRequest = page.waitForRequest((request) => request.url().endsWith('/entries/batch') && request.method() === 'POST');
 		await page.getByRole('button', { name: '保存账目' }).click();
-		const incomePayload = JSON.parse((await incomeRequest).postData() || '{}');
+		const incomePayload = JSON.parse((await incomeRequest).postData() || '{}').entries[0];
 		expect(incomePayload.categoryId).toBeNull();
 		expect(incomePayload.subcategoryId).toBeNull();
 		await expect(page).toHaveURL(/\/entries\/new$/);
@@ -75,7 +75,7 @@ test.describe('新增收入与普通支出', () => {
 
 	test('重复提交使用同一幂等键且只保留一笔账目', async ({ page }) => {
 		let postCount = 0;
-		await page.route('**/entries', async (route) => {
+		await page.route('**/entries/batch', async (route) => {
 			if (route.request().method() !== 'POST') {
 				await route.continue();
 				return;
@@ -99,6 +99,28 @@ test.describe('新增收入与普通支出', () => {
 		await expect(page).toHaveURL(/\/entries\/new$/);
 		await expect(page.getByRole('status')).toHaveText('账目已保存，可以继续记下一笔');
 		expect(postCount).toBe(2);
+	});
+
+	test('可以一次提交收入和普通支出多笔账目', async ({ page }) => {
+		await login(page);
+		await openNewEntry(page);
+		await page.getByLabel('粗分类').selectOption('2');
+		await page.getByLabel('金额').fill('12');
+		await page.getByLabel('备注（可选）').fill('batch expense');
+		await page.getByRole('button', { name: '＋ 添加一笔' }).click();
+		await page.getByRole('button', { name: '＋ 添加一笔' }).click();
+		await expect(page.getByRole('button', { name: '删除第 3 笔' })).toBeVisible();
+		await page.getByRole('button', { name: '删除第 3 笔' }).click();
+		await page.getByRole('button', { name: '收入' }).nth(1).click();
+		await page.getByLabel('金额2').fill('100');
+		await page.getByLabel('备注（可选）2').fill('batch income');
+		const request = page.waitForRequest((candidate) => candidate.url().endsWith('/entries/batch') && candidate.method() === 'POST');
+		await page.getByRole('button', { name: '保存 2 笔账目' }).click();
+		const payload = JSON.parse((await request).postData() || '{}');
+		expect(payload.entries).toHaveLength(2);
+		expect(payload.entries.map((entry: { type: string }) => entry.type)).toEqual(['expense', 'income']);
+		await expect(page.getByRole('status')).toHaveText('已保存 2 笔账目，可以继续添加');
+		await expect(page.getByRole('button', { name: '保存账目' })).toBeVisible();
 	});
 });
 
@@ -445,11 +467,12 @@ test.describe('发布边界与设置', () => {
 		const firstName = `浏览器细类一-${suffix}`;
 		const secondName = `浏览器细类二-${suffix}`;
 		const renamedName = `浏览器细类改名-${suffix}`;
-		await page.getByLabel('名称1').fill(firstName);
-		await page.getByLabel('所属粗类1').selectOption('2');
-		await page.getByRole('button', { name: '＋ 添加一行' }).click();
-		await page.getByLabel('名称2').fill(secondName);
-		await page.getByLabel('所属粗类2').selectOption('2');
+		await page.getByLabel('名称').fill(firstName);
+		await page.getByLabel('所属粗类').selectOption('2');
+		await page.getByRole('button', { name: '新增细类' }).click();
+		await expect(page.getByText(firstName, { exact: true })).toBeVisible();
+		await page.getByLabel('名称').fill(secondName);
+		await page.getByLabel('所属粗类').selectOption('2');
 		await page.getByRole('button', { name: '新增细类' }).click();
 		await expect(page.getByText(firstName, { exact: true })).toBeVisible();
 		await expect(page.getByText(secondName, { exact: true })).toBeVisible();

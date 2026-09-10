@@ -34,6 +34,10 @@ export const createEntrySchema = z
 	})
 	.openapi('CreateEntry');
 
+export const createEntryBatchSchema = z
+	.object({ entries: z.array(createEntrySchema).min(1).max(50) })
+	.openapi('CreateEntryBatch');
+
 export const entrySchema = z
 	.object({
 		id: z.string().openapi({ example: '8f4c1b2a-7db8-4c48-8b8f-2c51d10b1c2f' }),
@@ -57,6 +61,7 @@ export const entrySchema = z
 	.openapi('Entry');
 
 export const entryResponseSchema = z.object({ entry: entrySchema }).openapi('EntryResponse');
+export const entryBatchResponseSchema = z.object({ entries: z.array(entrySchema) }).openapi('EntryBatchResponse');
 export const entryDetailResponseSchema = z
 	.object({ entry: entrySchema, relatedEntry: entrySchema.nullable() })
 	.openapi('EntryDetailResponse');

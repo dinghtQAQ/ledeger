@@ -9,8 +9,8 @@ type CategoriesResponse = { coarseCategories: CoarseCategory[]; fineCategories: 
 type LedgerSettings = { paydayDay: number; timezone: string };
 type AnalyticsItem = { id: number | null; name: string; parentId?: number; parentName?: string; amount: string; displayAmount: string; count: number };
 type AnalyticsSummary = { from: string; to: string; periodIncome: string; periodExpense: string; periodNet: string; currentBalance: string; items: AnalyticsItem[] };
-type FineDraft = { id: string; name: string; coarseCategoryId: string };
 type ChartInteraction = { key: string; source: 'bar' | 'pie'; x: number; y: number };
+type EntryDraft = { id: string; type: 'income' | 'expense'; categoryId: string; subcategoryId: string; amount: string; occurredAt: string; note: string };
 type EntryType = 'income' | 'expense' | 'due_expense';
 type Entry = {
 	id: string;
@@ -33,6 +33,10 @@ type Entry = {
 };
 type EntryPage = { items: Entry[]; nextCursor: string | null };
 type EntryDetailResponse = { entry: Entry; relatedEntry: Entry | null };
+
+function createEntryDraft(): EntryDraft {
+	return { id: createIdempotencyKey(), type: 'expense', categoryId: '', subcategoryId: '', amount: '', occurredAt: currentDateTimeLocal(), note: '' };
+}
 
 declare global {
 	interface Window {
@@ -451,13 +455,8 @@ function EntryDetailsPage({ id }: { id: string }) {
 }
 
 function NewEntryPage() {
-	const [type, setType] = useState<'income' | 'expense'>('expense');
 	const [categories, setCategories] = useState<CategoriesResponse | null>(null);
-	const [categoryId, setCategoryId] = useState('');
-	const [subcategoryId, setSubcategoryId] = useState('');
-	const [amount, setAmount] = useState('');
-	const [occurredAt, setOccurredAt] = useState(currentDateTimeLocal);
-	const [note, setNote] = useState('');
+	const [drafts, setDrafts] = useState<EntryDraft[]>([createEntryDraft()]);
 	const [busy, setBusy] = useState(false);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState('');
@@ -468,56 +467,45 @@ function NewEntryPage() {
 		api<CategoriesResponse>('/categories').then(setCategories).catch((caught) => setError(caught instanceof Error ? caught.message : '分类加载失败')).finally(() => setLoading(false));
 	}, []);
 
-	const availableFineCategories = categories?.fineCategories.filter((fine) => fine.isActive && String(fine.coarseCategoryId) === categoryId) ?? [];
+	function updateDraft(id: string, patch: Partial<EntryDraft>) {
+		setDrafts((current) => current.map((draft) => draft.id === id ? { ...draft, ...patch } : draft));
+	}
 
-	function changeType(nextType: 'income' | 'expense') {
-		setType(nextType);
-		if (nextType === 'income') {
-			setCategoryId('');
-			setSubcategoryId('');
-		}
+	function changeDraftType(id: string, type: 'income' | 'expense') {
+		updateDraft(id, type === 'income' ? { type, categoryId: '', subcategoryId: '' } : { type });
 	}
 
 	async function submit(event: React.FormEvent<HTMLFormElement>) {
 		event.preventDefault();
 		setError(''); setMessage('');
-		if (type === 'expense' && !categoryId) {
-			setError('普通支出必须选择粗分类');
-			return;
-		}
-		if (!isPositiveAccountingAmount(amount.trim())) {
-			setError('请输入大于 0 的金额');
-			return;
-		}
-		if (!occurredAt) {
-			setError('请选择发生时间');
-			return;
+		for (const [index, draft] of drafts.entries()) {
+			const row = index + 1;
+			if (draft.type === 'expense' && !draft.categoryId) { setError(drafts.length === 1 ? '普通支出必须选择粗分类' : `第 ${row} 笔普通支出必须选择粗分类`); return; }
+			if (!isPositiveAccountingAmount(draft.amount.trim())) { setError(drafts.length === 1 ? '请输入大于 0 的金额' : `第 ${row} 笔请输入大于 0 的金额`); return; }
+			if (!draft.occurredAt) { setError(drafts.length === 1 ? '请选择发生时间' : `第 ${row} 笔请选择发生时间`); return; }
 		}
 		setBusy(true);
 		try {
-			const payload = {
-				type,
-				amount: amount.trim(),
-				occurredAt: dateTimeLocalToIso(occurredAt),
-				categoryId: type === 'expense' && categoryId ? Number(categoryId) : null,
-				subcategoryId: type === 'expense' && subcategoryId ? Number(subcategoryId) : null,
-				note: note.trim() || null,
-			};
+			const payload = drafts.map((draft) => ({
+				type: draft.type,
+				amount: draft.amount.trim(),
+				occurredAt: dateTimeLocalToIso(draft.occurredAt),
+				categoryId: draft.type === 'expense' && draft.categoryId ? Number(draft.categoryId) : null,
+				subcategoryId: draft.type === 'expense' && draft.subcategoryId ? Number(draft.subcategoryId) : null,
+				note: draft.note.trim() || null,
+			}));
 			const payloadKey = JSON.stringify(payload);
 			if (!idempotencyRef.current || idempotencyRef.current.payload !== payloadKey) {
 				idempotencyRef.current = { payload: payloadKey, key: createIdempotencyKey() };
 			}
-			await api<{ entry: Entry }>('/entries', {
+			await api<{ entries: Entry[] }>('/entries/batch', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyRef.current.key },
-				body: payloadKey,
+				body: JSON.stringify({ entries: payload }),
 			});
 			idempotencyRef.current = null;
-			setAmount('');
-			setSubcategoryId('');
-			setNote('');
-			setOccurredAt(currentDateTimeLocal());
-			setMessage('账目已保存，可以继续记下一笔');
+			setDrafts([createEntryDraft()]);
+			setMessage(payload.length === 1 ? '账目已保存，可以继续记下一笔' : `已保存 ${payload.length} 笔账目，可以继续添加`);
 		} catch (caught) {
 			setError(caught instanceof Error ? caught.message : '账目创建失败');
 		} finally {
@@ -528,14 +516,24 @@ function NewEntryPage() {
 	if (loading) return <section className="empty-state"><p>正在加载分类…</p></section>;
 	if (!categories) return <section className="empty-state"><p className="error" role="alert">{error || '分类加载失败'}</p></section>;
 	return <section className="new-entry-layout">
-		<div className="form-intro"><p className="eyebrow">NEW LEDGER ENTRY</p><h2>记下一笔新账</h2><p className="muted">收入可以不选分类；普通支出需要选择粗分类，细分类可留空。</p></div>
+		<div className="form-intro"><p className="eyebrow">NEW LEDGER ENTRIES</p><h2>新增记账</h2><p className="muted">收入可以不选分类；普通支出需要选择粗分类，细分类可留空。一次可以提交多笔。</p></div>
 		<form className="entry-form" onSubmit={submit}>
-			<fieldset className="entry-type-field"><legend>类型</legend><div className="type-toggle" role="group" aria-label="账目类型"><button type="button" className={type === 'expense' ? 'selected' : ''} onClick={() => changeType('expense')}>普通支出</button><button type="button" className={type === 'income' ? 'selected' : ''} onClick={() => changeType('income')}>收入</button></div></fieldset>
-			{type === 'expense' && <div className="field-grid"><div><label htmlFor="entry-category">粗分类<span aria-hidden="true"> *</span></label><select id="entry-category" value={categoryId} onChange={(event) => { setCategoryId(event.target.value); setSubcategoryId(''); }}><option value="">请选择粗分类</option>{categories.coarseCategories.map((coarse) => <option key={coarse.id} value={coarse.id}>{coarse.name}</option>)}</select></div><div><label htmlFor="entry-subcategory">细分类（可选）</label><select id="entry-subcategory" value={subcategoryId} disabled={!categoryId || availableFineCategories.length === 0} onChange={(event) => setSubcategoryId(event.target.value)}><option value="">不选择细分类</option>{availableFineCategories.map((fine) => <option key={fine.id} value={fine.id}>{fine.name}</option>)}</select></div></div>}
-			<div className="field-grid"><div><label htmlFor="entry-amount">金额</label><input id="entry-amount" inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="0.00" required /></div><div><label htmlFor="entry-occurred-at">发生时间</label><input id="entry-occurred-at" type="datetime-local" value={occurredAt} onChange={(event) => setOccurredAt(event.target.value)} required /></div></div>
-			<div><label htmlFor="entry-note">备注（可选）</label><textarea id="entry-note" value={note} onChange={(event) => setNote(event.target.value)} rows={3} placeholder="写点容易回想的说明" /></div>
+			<div className="entry-drafts">{drafts.map((draft, index) => {
+				const row = index + 1;
+				const availableFineCategories = categories.fineCategories.filter((fine) => fine.isActive && String(fine.coarseCategoryId) === draft.categoryId);
+				const label = (name: string) => index === 0 ? name : `${name}${row}`;
+				return <fieldset className="entry-draft-row" key={draft.id}>
+					<legend>第 {row} 笔</legend>
+					<div className="entry-draft-heading"><span>类型</span>{drafts.length > 1 && <button type="button" className="icon-button" aria-label={`删除第 ${row} 笔`} title="删除这一笔" onClick={() => setDrafts((current) => current.filter((item) => item.id !== draft.id))}>×</button>}</div>
+					<div className="type-toggle" role="group" aria-label={label('账目类型')}><button type="button" className={draft.type === 'expense' ? 'selected' : ''} onClick={() => changeDraftType(draft.id, 'expense')}>普通支出</button><button type="button" className={draft.type === 'income' ? 'selected' : ''} onClick={() => changeDraftType(draft.id, 'income')}>收入</button></div>
+					{draft.type === 'expense' && <div className="field-grid"><div><label htmlFor={`entry-category-${draft.id}`}>粗分类<span aria-hidden="true"> *</span></label><select id={`entry-category-${draft.id}`} aria-label={label('粗分类')} value={draft.categoryId} onChange={(event) => updateDraft(draft.id, { categoryId: event.target.value, subcategoryId: '' })}><option value="">请选择粗分类</option>{categories.coarseCategories.map((coarse) => <option key={coarse.id} value={coarse.id}>{coarse.name}</option>)}</select></div><div><label htmlFor={`entry-subcategory-${draft.id}`}>细分类（可选）</label><select id={`entry-subcategory-${draft.id}`} aria-label={label('细分类（可选）')} value={draft.subcategoryId} disabled={!draft.categoryId || availableFineCategories.length === 0} onChange={(event) => updateDraft(draft.id, { subcategoryId: event.target.value })}><option value="">不选择细分类</option>{availableFineCategories.map((fine) => <option key={fine.id} value={fine.id}>{fine.name}</option>)}</select></div></div>}
+					<div className="field-grid"><div><label htmlFor={`entry-amount-${draft.id}`}>金额</label><input id={`entry-amount-${draft.id}`} aria-label={label('金额')} inputMode="decimal" value={draft.amount} onChange={(event) => updateDraft(draft.id, { amount: event.target.value })} placeholder="0.00" required /></div><div><label htmlFor={`entry-occurred-at-${draft.id}`}>发生时间</label><input id={`entry-occurred-at-${draft.id}`} aria-label={label('发生时间')} type="datetime-local" value={draft.occurredAt} onChange={(event) => updateDraft(draft.id, { occurredAt: event.target.value })} required /></div></div>
+					<div><label htmlFor={`entry-note-${draft.id}`}>备注（可选）</label><textarea id={`entry-note-${draft.id}`} aria-label={label('备注（可选）')} value={draft.note} onChange={(event) => updateDraft(draft.id, { note: event.target.value })} rows={2} placeholder="写点容易回想的说明" /></div>
+				</fieldset>;
+			})}</div>
+			<button type="button" className="secondary-button add-entry-button" onClick={() => setDrafts((current) => [...current, createEntryDraft()])} disabled={busy || drafts.length >= 50}>＋ 添加一笔</button>
 			{(error || message) && <p className={error ? 'error' : 'success'} role={error ? 'alert' : 'status'}>{error || message}</p>}
-			<div className="form-actions"><button type="button" className="secondary-button" onClick={() => navigate('/entries')}>取消</button><button type="submit" className="primary-button" disabled={busy}>{busy ? '保存中…' : '保存账目'}</button></div>
+			<div className="form-actions"><button type="button" className="secondary-button" onClick={() => navigate('/entries')}>取消</button><button type="submit" className="primary-button" disabled={busy}>{busy ? '保存中…' : drafts.length === 1 ? '保存账目' : `保存 ${drafts.length} 笔账目`}</button></div>
 		</form>
 	</section>;
 }
@@ -544,7 +542,8 @@ function SettingsPage() {
 	const [categories, setCategories] = useState<CategoriesResponse | null>(null);
 	const [settings, setSettings] = useState<LedgerSettings | null>(null);
 	const [paydayDay, setPaydayDay] = useState('20');
-	const [fineDrafts, setFineDrafts] = useState<FineDraft[]>([{ id: createIdempotencyKey(), name: '', coarseCategoryId: '1' }]);
+	const [newName, setNewName] = useState('');
+	const [newParent, setNewParent] = useState('1');
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState('');
 	const [message, setMessage] = useState('');
@@ -557,7 +556,7 @@ function SettingsPage() {
 		setCategories(nextCategories);
 		setSettings(nextSettings);
 		setPaydayDay(String(nextSettings.paydayDay));
-		setFineDrafts((current) => current.map((draft) => ({ ...draft, coarseCategoryId: draft.coarseCategoryId || String(nextCategories.coarseCategories[0]?.id ?? '') })));
+		if (!newParent && nextCategories.coarseCategories[0]) setNewParent(String(nextCategories.coarseCategories[0].id));
 	}
 
 	useEffect(() => {
@@ -574,27 +573,13 @@ function SettingsPage() {
 		finally { setBusy(false); }
 	}
 
-	function addFineDraft() {
-		setFineDrafts((current) => [...current, { id: createIdempotencyKey(), name: '', coarseCategoryId: String(categories?.coarseCategories[0]?.id ?? '') }]);
-	}
-
-	function updateFineDraft(id: string, patch: Partial<Omit<FineDraft, 'id'>>) {
-		setFineDrafts((current) => current.map((draft) => draft.id === id ? { ...draft, ...patch } : draft));
-	}
-
 	async function createFine(event: React.FormEvent<HTMLFormElement>) {
 		event.preventDefault();
-		const drafts = fineDrafts.map((draft) => ({ ...draft, name: draft.name.trim() }));
-		if (drafts.some((draft) => !draft.name || !draft.coarseCategoryId)) {
-			setError('请填写每一行的细类名称并选择所属粗类');
-			return;
-		}
+		if (!newName.trim()) return;
 		setBusy(true); setError(''); setMessage('');
 		try {
-			for (const draft of drafts) {
-				await api<FineCategory>('/categories/fine', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: draft.name, coarseCategoryId: Number(draft.coarseCategoryId) }) });
-			}
-			setFineDrafts([{ id: createIdempotencyKey(), name: '', coarseCategoryId: String(categories?.coarseCategories[0]?.id ?? '') }]); setMessage(`${drafts.length} 个细类已新增`); await reload();
+			await api<FineCategory>('/categories/fine', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: newName, coarseCategoryId: Number(newParent) }) });
+			setNewName(''); setMessage('细类已新增'); await reload();
 		} catch (caught) { setError(caught instanceof Error ? caught.message : '新增失败'); }
 		finally { setBusy(false); }
 	}
@@ -635,13 +620,9 @@ function SettingsPage() {
 		<section className="settings-section fine-section">
 			<div className="section-heading"><div><p className="eyebrow">FINE CATEGORIES</p><h2>细类管理</h2></div><span className="muted">停用后不可用于新账目</span></div>
 			<form className="fine-create" onSubmit={createFine}>
-				<div className="fine-create-heading"><span>名称</span><span>所属粗类</span><span className="sr-only">操作</span></div>
-				{fineDrafts.map((draft, index) => <div className="fine-draft-row" key={draft.id}>
-					<input aria-label={`名称${index + 1}`} value={draft.name} onChange={(event) => updateFineDraft(draft.id, { name: event.target.value })} placeholder="例如：房租" />
-					<select aria-label={`所属粗类${index + 1}`} value={draft.coarseCategoryId} onChange={(event) => updateFineDraft(draft.id, { coarseCategoryId: event.target.value })}>{categories.coarseCategories.map((coarse) => <option key={coarse.id} value={coarse.id}>{coarse.name}</option>)}</select>
-					<button type="button" className="icon-button" aria-label={`删除第 ${index + 1} 行`} title="删除这一行" disabled={fineDrafts.length === 1 || busy} onClick={() => setFineDrafts((current) => current.filter((item) => item.id !== draft.id))}>×</button>
-				</div>)}
-				<div className="fine-create-actions"><button type="button" className="secondary-button" onClick={addFineDraft} disabled={busy}>＋ 添加一行</button><button type="submit" className="primary-button" disabled={busy}>新增细类</button></div>
+				<label htmlFor="fine-name">名称</label><input id="fine-name" value={newName} onChange={(event) => setNewName(event.target.value)} placeholder="例如：房租" required />
+				<label htmlFor="fine-parent">所属粗类</label><select id="fine-parent" value={newParent} onChange={(event) => setNewParent(event.target.value)}>{categories.coarseCategories.map((coarse) => <option key={coarse.id} value={coarse.id}>{coarse.name}</option>)}</select>
+				<button type="submit" disabled={busy}>新增细类</button>
 			</form>
 			<div className="fine-list">{categories.coarseCategories.map((coarse) => <div className="fine-group" key={coarse.id}><h3>{coarse.name}</h3>{categories.fineCategories.filter((fine) => fine.coarseCategoryId === coarse.id).map((fine, index, siblings) => <div className={`fine-row ${fine.isActive ? '' : 'inactive'}`} key={fine.id}><span className="fine-name">{fine.name}{!fine.isActive && <em>已停用</em>}</span><span className="fine-actions"><button type="button" title="上移" aria-label={`${fine.name} 上移`} disabled={busy || index === 0} onClick={() => updateFine(fine, { sortOrder: siblings[index - 1].sortOrder - 1 })}>↑</button><button type="button" title="下移" aria-label={`${fine.name} 下移`} disabled={busy || index === siblings.length - 1} onClick={() => updateFine(fine, { sortOrder: siblings[index + 1].sortOrder + 1 })}>↓</button><button type="button" onClick={() => { const name = window.prompt('新的细类名称', fine.name); if (name?.trim()) void updateFine(fine, { name: name.trim() }); }}>改名</button>{fine.isActive && <button type="button" onClick={() => void disableFine(fine)}>停用</button>}</span></div>)}</div>)}</div>
 		</section>

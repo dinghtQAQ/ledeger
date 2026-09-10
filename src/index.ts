@@ -4,9 +4,11 @@ import { OpenAPIHono, createRoute } from '@hono/zod-openapi';
 import { amountToUnits, displayAmount, normalizeAmount, unitsToAmount } from './money';
 import {
 	createEntrySchema,
+	createEntryBatchSchema,
 	entryDetailResponseSchema,
 	entryPageSchema,
 	entryResponseSchema,
+	entryBatchResponseSchema,
 	errorSchema,
 	healthSchema,
 	authLoginSchema,
@@ -78,6 +80,18 @@ type CreateEntryInput = {
 	categoryId?: number | null;
 	subcategoryId?: number | null;
 	note?: string | null;
+};
+type PreparedEntry = {
+	input: CreateEntryInput;
+	amount: string;
+	amountUnits: string;
+	occurredAt: string;
+	dueAt: null;
+	category: string | null;
+	categoryId: number | null;
+	subcategoryId: number | null;
+	note: string | null;
+	payload: string;
 };
 type ListEntriesQuery = {
 	cursor?: string;
@@ -422,6 +436,30 @@ const createEntryRoute = createRoute({
 	responses: {
 		200: { description: 'Existing idempotent entry', content: { 'application/json': { schema: entryResponseSchema } } },
 		201: { description: 'Created', content: { 'application/json': { schema: entryResponseSchema } } },
+		400: errorResponse,
+		403: errorResponse,
+		409: errorResponse,
+	},
+});
+
+const createEntryBatchRoute = createRoute({
+	method: 'post',
+	path: '/entries/batch',
+	security: [{ bearerAuth: [] }],
+	parameters: [
+		{
+			name: 'Idempotency-Key',
+			in: 'header',
+			required: true,
+			schema: { type: 'string', minLength: 1 },
+		},
+	],
+	request: {
+		body: { required: true, content: { 'application/json': { schema: createEntryBatchSchema } } },
+	},
+	responses: {
+		200: { description: 'Existing idempotent entries', content: { 'application/json': { schema: entryBatchResponseSchema } } },
+		201: { description: 'Created', content: { 'application/json': { schema: entryBatchResponseSchema } } },
 		400: errorResponse,
 		403: errorResponse,
 		409: errorResponse,
@@ -828,33 +866,113 @@ registerOpenApi(analyticsSummaryRoute, async (c: LedgerContext) => {
 	}, 200);
 });
 
-registerOpenApi(createEntryRoute, async (c: LedgerContext) => {
-	const idempotencyKey = c.req.header('Idempotency-Key');
-	if (!idempotencyKey) return jsonError(c, 400, 'Idempotency-Key is required');
-	const input = validated<CreateEntryInput>(c, 'json');
+async function prepareEntry(db: D1Database, input: CreateEntryInput): Promise<{ value: PreparedEntry } | { error: string }> {
 	let amount: string;
 	try {
 		amount = normalizeAmount(input.amount);
 	} catch {
-		return jsonError(c, 400, 'invalid amount');
+		return { error: 'invalid amount' };
 	}
 	const occurredAt = new Date(input.occurredAt).toISOString();
 	const dueAt = null;
 	const categoryId = input.categoryId ?? null;
 	const subcategoryId = input.subcategoryId ?? null;
-	if (input.type === 'expense' && categoryId === null) return jsonError(c, 400, 'expense category is required');
-	if (subcategoryId !== null && categoryId === null) return jsonError(c, 400, 'subcategory requires a coarse category');
+	if (input.type === 'expense' && categoryId === null) return { error: 'expense category is required' };
+	if (subcategoryId !== null && categoryId === null) return { error: 'subcategory requires a coarse category' };
 	if (categoryId !== null) {
-		const coarse = await c.env.DB.prepare('SELECT id FROM coarse_categories WHERE id = ?').bind(categoryId).first();
-		if (!coarse) return jsonError(c, 400, 'invalid coarse category');
+		const coarse = await db.prepare('SELECT id FROM coarse_categories WHERE id = ?').bind(categoryId).first();
+		if (!coarse) return { error: 'invalid coarse category' };
 	}
 	if (subcategoryId !== null) {
-		const fine = await c.env.DB.prepare('SELECT id FROM fine_categories WHERE id = ? AND coarse_category_id = ? AND is_active = 1').bind(subcategoryId, categoryId).first();
-		if (!fine) return jsonError(c, 400, 'invalid or inactive fine category');
+		const fine = await db.prepare('SELECT id FROM fine_categories WHERE id = ? AND coarse_category_id = ? AND is_active = 1').bind(subcategoryId, categoryId).first();
+		if (!fine) return { error: 'invalid or inactive fine category' };
 	}
 	const category = input.category ?? null;
 	const note = input.note ?? null;
 	const payload = JSON.stringify({ type: input.type, amount, occurredAt, dueAt, category, categoryId, subcategoryId, note });
+	return {
+		value: {
+			input,
+			amount,
+			amountUnits: amountToUnits(amount).toString(),
+			occurredAt,
+			dueAt,
+			category,
+			categoryId,
+			subcategoryId,
+			note,
+			payload,
+		},
+	};
+}
+
+function entryInsertStatement(db: D1Database, entry: PreparedEntry, id: string, idempotencyKey: string, timestamp: string) {
+	return db.prepare(
+		`INSERT INTO entries (
+			id, type, amount_units, occurred_at, due_at, due_status,
+			category, category_id, subcategory_id, note, idempotency_key, idempotency_payload, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	).bind(
+		id,
+		entry.input.type,
+		entry.amountUnits,
+		entry.occurredAt,
+		entry.dueAt,
+		null,
+		entry.category,
+		entry.categoryId,
+		entry.subcategoryId,
+		entry.note,
+		idempotencyKey,
+		entry.payload,
+		timestamp,
+		timestamp,
+	);
+}
+
+registerOpenApi(createEntryBatchRoute, async (c: LedgerContext) => {
+	const idempotencyKey = c.req.header('Idempotency-Key');
+	if (!idempotencyKey) return jsonError(c, 400, 'Idempotency-Key is required');
+	const input = validated<{ entries: CreateEntryInput[] }>(c, 'json');
+	const prepared: PreparedEntry[] = [];
+	for (const entry of input.entries) {
+		const result = await prepareEntry(c.env.DB, entry);
+		if ('error' in result) return jsonError(c, 400, result.error);
+		prepared.push(result.value);
+	}
+	const batchPayloads = prepared.map((entry) => JSON.stringify({ batchSize: prepared.length, entry: JSON.parse(entry.payload) }));
+	const keys = prepared.map((_, index) => `batch:${idempotencyKey}:${index}`);
+	const existingRows = await Promise.all(keys.map((key) => c.env.DB.prepare('SELECT * FROM entries WHERE idempotency_key = ?').bind(key).first<StoredEntryRow>()));
+	if (existingRows.some(Boolean)) {
+		if (existingRows.some((row) => !row)) return jsonError(c, 409, 'Idempotency-Key was already used with a different request');
+		const matches = existingRows.every((row, index) => row?.idempotency_payload === batchPayloads[index]);
+		if (!matches) return jsonError(c, 409, 'Idempotency-Key was already used with a different request');
+		return c.json({ entries: existingRows.map((row) => toEntry(row as StoredEntryRow)) }, 200);
+	}
+
+	const ids = prepared.map(() => crypto.randomUUID());
+	const timestamp = now();
+	try {
+		await c.env.DB.batch(prepared.map((entry, index) => entryInsertStatement(c.env.DB, { ...entry, payload: batchPayloads[index] }, ids[index], keys[index], timestamp)));
+	} catch (error) {
+		const concurrentRows = await Promise.all(keys.map((key) => c.env.DB.prepare('SELECT * FROM entries WHERE idempotency_key = ?').bind(key).first<StoredEntryRow>()));
+		if (concurrentRows.every(Boolean) && concurrentRows.every((row, index) => row?.idempotency_payload === batchPayloads[index])) {
+			return c.json({ entries: concurrentRows.map((row) => toEntry(row as StoredEntryRow)) }, 200);
+		}
+		throw error;
+	}
+	const rows = await Promise.all(ids.map((id) => c.env.DB.prepare('SELECT * FROM entries WHERE id = ?').bind(id).first<EntryRow>()));
+	return c.json({ entries: rows.map((row) => toEntry(row as EntryRow)) }, 201);
+});
+
+registerOpenApi(createEntryRoute, async (c: LedgerContext) => {
+	const idempotencyKey = c.req.header('Idempotency-Key');
+	if (!idempotencyKey) return jsonError(c, 400, 'Idempotency-Key is required');
+	const input = validated<CreateEntryInput>(c, 'json');
+	const preparedResult = await prepareEntry(c.env.DB, input);
+	if ('error' in preparedResult) return jsonError(c, 400, preparedResult.error);
+	const prepared = preparedResult.value;
+	const { payload } = prepared;
 	const existing = await c.env.DB.prepare('SELECT * FROM entries WHERE idempotency_key = ?').bind(idempotencyKey).first<StoredEntryRow>();
 	if (existing) {
 		if (existing.idempotency_payload !== payload) {
@@ -866,29 +984,7 @@ registerOpenApi(createEntryRoute, async (c: LedgerContext) => {
 	const id = crypto.randomUUID();
 	const timestamp = now();
 	try {
-		await c.env.DB.prepare(
-			`INSERT INTO entries (
-				id, type, amount_units, occurred_at, due_at, due_status,
-				category, category_id, subcategory_id, note, idempotency_key, idempotency_payload, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		)
-			.bind(
-				id,
-				input.type,
-				amountToUnits(amount).toString(),
-				occurredAt,
-				dueAt,
-				null,
-				category,
-				categoryId,
-				subcategoryId,
-				note,
-				idempotencyKey,
-				payload,
-				timestamp,
-				timestamp,
-			)
-			.run();
+		await entryInsertStatement(c.env.DB, prepared, id, idempotencyKey, timestamp).run();
 	} catch (error) {
 		const concurrent = await c.env.DB.prepare('SELECT * FROM entries WHERE idempotency_key = ?')
 			.bind(idempotencyKey)

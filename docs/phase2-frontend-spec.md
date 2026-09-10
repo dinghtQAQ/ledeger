@@ -75,23 +75,25 @@
 44. As the ledger owner, I want income entries to allow empty category fields, so that income does not require an artificial spending classification.
 45. As the system, I want a fine category to be rejected when it does not belong to the selected coarse category, so that category relationships remain valid.
 46. As the system, I want a stopped fine category to be unavailable for new entries, so that deactivated classifications do not continue spreading.
-47. As the ledger owner, I want a successful create to return me to a useful view with the new entry visible, so that I can verify the result immediately.
+47. As the ledger owner, I want a successful create to stay on the entry form with a clear confirmation, so that I can continue recording without reopening the page.
 48. As the system, I want repeated create submissions to retain the existing idempotency behavior, so that accidental retries do not create duplicate entries.
+49. As the ledger owner, I want to add multiple income and ordinary expense rows before submitting, so that a group of entries can be recorded in one action.
+50. As the system, I want batch entry validation and persistence to be atomic and idempotent, so that a retry cannot duplicate the batch or leave only part of it saved.
 
 ### Categories and Settings
 
-49. As the ledger owner, I want to view the fixed coarse categories, so that I understand the available spending vocabulary.
-50. As the system, I want coarse categories to use stable numeric IDs and names, so that historical entries do not depend on display text.
-51. As the ledger owner, I want to create a fine category under a coarse category, so that the classification can become more specific over time.
-52. As the ledger owner, I want to rename a fine category, so that its wording can improve without rewriting historical entries.
-53. As the ledger owner, I want to reorder fine categories, so that frequently used options appear in a convenient order.
-54. As the ledger owner, I want to deactivate a fine category, so that it cannot be selected for new entries while historical entries remain readable.
-55. As the system, I want fine categories to use stable numeric IDs and a coarse-category foreign key, so that hierarchy validation is explicit.
-56. As the system, I want used fine categories to be non-deletable, so that historical entries never lose their classification reference.
-57. As the ledger owner, I want to view the configured payday anchor, so that I know how the current analysis cycle is calculated.
-58. As the ledger owner, I want to change the payday anchor from the first through the twenty-eighth day, so that the cycle matches my actual salary schedule.
-59. As the ledger owner, I want the default payday anchor to be the twentieth day, so that the first setup matches the agreed cycle.
-60. As the system, I want all cycle calculations to use the existing configured timezone, so that dates do not shift unexpectedly between the UI and database.
+51. As the ledger owner, I want to view the fixed coarse categories, so that I understand the available spending vocabulary.
+52. As the system, I want coarse categories to use stable numeric IDs and names, so that historical entries do not depend on display text.
+53. As the ledger owner, I want to create a fine category under a coarse category, so that the classification can become more specific over time.
+54. As the ledger owner, I want to rename a fine category, so that its wording can improve without rewriting historical entries.
+55. As the ledger owner, I want to reorder fine categories, so that frequently used options appear in a convenient order.
+56. As the ledger owner, I want to deactivate a fine category, so that it cannot be selected for new entries while historical entries remain readable.
+57. As the system, I want fine categories to use stable numeric IDs and a coarse-category foreign key, so that hierarchy validation is explicit.
+58. As the system, I want used fine categories to be non-deletable, so that historical entries never lose their classification reference.
+59. As the ledger owner, I want to view the configured payday anchor, so that I know how the current analysis cycle is calculated.
+60. As the ledger owner, I want to change the payday anchor from the first through the twenty-eighth day, so that the cycle matches my actual salary schedule.
+61. As the ledger owner, I want the default payday anchor to be the twentieth day, so that the first setup matches the agreed cycle.
+62. As the system, I want all cycle calculations to use the existing configured timezone, so that dates do not shift unexpectedly between the UI and database.
 
 ## Implementation Decisions
 
@@ -145,6 +147,7 @@ Entries:
 - Existing list, detail, create, and reversal operations remain the primary ledger boundary.
 - Listing adds `type`, `categoryId`, and `subcategoryId` filters while preserving cursor pagination, date filters, and supported sorts.
 - Create accepts only income and ordinary expense; expense classification and parent-child validation are enforced server-side.
+- `POST /entries/batch` accepts `{ entries: CreateEntry[] }` with 1–50 rows and the same per-entry validation. It returns `{ entries }`, uses one `Idempotency-Key`, and persists the complete batch atomically.
 - Reversal keeps the existing API meaning of the delete-shaped route but is presented in the UI as “冲正”.
 
 Categories and settings:
@@ -181,6 +184,7 @@ Analytics:
 - The entries page shows all records, including reversal relationships, and uses “load more” for cursor pagination.
 - The detail page provides read-only fields and a confirmation flow for eligible reversal operations.
 - The new-entry page presents type, coarse category, optional fine category, amount, and note; occurred time defaults to now.
+- The new-entry page supports adding and removing multiple income/expense rows before one batch submission. A successful batch clears the draft rows and leaves the user on the page.
 - The settings page provides payday configuration, fine-category management, and current-session logout. Coarse categories are read-only.
 
 ## Testing Decisions
@@ -199,6 +203,7 @@ Use the existing Worker HTTP test boundary to cover:
 - Analysis totals, current balance independence from the selected date range, decimal-string amounts, coarse/fine aggregation, uncategorized grouping, and reversal exclusion.
 - Entry list filters, cursor continuation, detail retrieval, and reversal eligibility.
 - Idempotent creation and conflict behavior.
+- Batch entry creation, atomic rollback on validation failure, idempotent retry, and idempotency conflict behavior.
 
 ### Browser seam
 
@@ -207,7 +212,8 @@ Use browser-level tests for complete user flows:
 - User logs in and lands on `/analytics`.
 - User switches cycles and custom date ranges; the chart updates without changing settings.
 - User toggles coarse and fine chart levels.
-- User creates income and expense entries and sees the result in the list.
+- User creates income and expense entries and sees a success confirmation while the entry form remains ready for another batch.
+- User adds multiple income and expense rows, submits them together, and sees one success message for the batch.
 - User opens details and confirms a reversal; both records remain visible while analytics excludes them.
 - User creates, renames, reorders, and disables a fine category.
 - User changes the payday anchor and sees the default current cycle update.

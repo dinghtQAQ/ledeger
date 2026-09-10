@@ -277,6 +277,7 @@ describe('Hono worker', () => {
 		const specBody = await spec.json<any>();
 		expect(specBody.paths['/entries'].post).toBeTruthy();
 		expect(specBody.paths['/entries'].post.parameters[0].name).toBe('Idempotency-Key');
+		expect(specBody.paths['/entries/batch'].post).toBeTruthy();
 		expect(specBody.components.securitySchemes.bearerAuth.scheme).toBe('bearer');
 		const docs = await request('/docs');
 		expect(docs.status).toBe(200);
@@ -347,6 +348,56 @@ describe('Hono worker', () => {
 		expect(first.body.entry.amount).toBe('12.3457');
 		expect(first.body.entry.displayAmount).toBe('12.346');
 		expect(conflict.response.status).toBe(409);
+	});
+
+	it('creates a mixed income and expense batch atomically and idempotently', async () => {
+		const entries = [
+			{ type: 'income', amount: '100.0016', occurredAt: '2026-09-01T01:02:03Z', note: 'salary' },
+			{ type: 'expense', amount: '12.3400', occurredAt: '2026-09-01T02:02:03Z', categoryId: 2, note: 'lunch' },
+		];
+		const init = {
+			method: 'POST',
+			headers: {
+				Authorization: 'Bearer test-key',
+				Origin: 'https://example.com',
+				'Content-Type': 'application/json',
+				'Idempotency-Key': 'batch-1',
+			},
+			body: JSON.stringify({ entries }),
+		};
+		const first = await request('/entries/batch', init);
+		const retry = await request('/entries/batch', init);
+		const firstBody = await first.json<any>();
+		const retryBody = await retry.json<any>();
+		expect(first.status).toBe(201);
+		expect(firstBody.entries).toHaveLength(2);
+		expect(firstBody.entries.map((entry: any) => entry.type)).toEqual(['income', 'expense']);
+		expect(retry.status).toBe(200);
+		expect(retryBody.entries.map((entry: any) => entry.id)).toEqual(firstBody.entries.map((entry: any) => entry.id));
+
+		const conflict = await request('/entries/batch', { ...init, body: JSON.stringify({ entries: [{ ...entries[0], amount: '101' }, entries[1]] }) });
+		expect(conflict.status).toBe(409);
+		const shortConflict = await request('/entries/batch', { ...init, body: JSON.stringify({ entries: [entries[0]] }) });
+		expect(shortConflict.status).toBe(409);
+	});
+
+	it('does not partially persist an invalid entry batch', async () => {
+		const response = await request('/entries/batch', {
+			method: 'POST',
+			headers: {
+				Authorization: 'Bearer test-key',
+				Origin: 'https://example.com',
+				'Content-Type': 'application/json',
+				'Idempotency-Key': 'batch-invalid',
+			},
+			body: JSON.stringify({ entries: [
+				{ type: 'income', amount: '10', occurredAt: '2026-09-01T01:02:03Z' },
+				{ type: 'expense', amount: '12', occurredAt: '2026-09-01T01:02:03Z' },
+			] }),
+		});
+		expect(response.status).toBe(400);
+		const count = await env.DB.prepare('SELECT COUNT(*) AS count FROM entries').first<{ count: number }>();
+		expect(count?.count).toBe(0);
 	});
 
 	it('canonicalizes idempotent payloads and rejects zero or numeric amounts', async () => {
