@@ -12,13 +12,21 @@ async function login(page: import('@playwright/test').Page) {
 }
 
 async function openNewEntry(page: import('@playwright/test').Page) {
-	await page.getByRole('link', { name: '账目' }).click();
-	await expect(page).toHaveURL(/\/entries$/);
-	await page.getByRole('button', { name: '新增账目' }).first().click();
+	await page.getByRole('link', { name: '新增账目' }).click();
 	await expect(page).toHaveURL(/\/entries\/new$/);
 }
 
 test.describe('新增收入与普通支出', () => {
+	test('账目列表入口仍可打开顶栏新增标签', async ({ page }) => {
+		await login(page);
+		await page.getByRole('link', { name: '账目', exact: true }).click();
+		await expect(page).toHaveURL(/\/entries$/);
+		await page.getByRole('button', { name: '新增账目' }).first().click();
+		await expect(page).toHaveURL(/\/entries\/new$/);
+		await expect(page.getByRole('heading', { name: '新增记账', level: 2 })).toBeVisible();
+		await expect(page.getByRole('button', { name: '取消' })).toHaveCount(0);
+	});
+
 	test('登录后默认进入分析并显示周期摘要与粗类图表', async ({ page }) => {
 		await page.clock.install({ time: new Date('2026-09-02T00:00:00Z') });
 		await login(page);
@@ -35,7 +43,7 @@ test.describe('新增收入与普通支出', () => {
 	test('创建普通支出后留在新增页面并清空可重复输入', async ({ page }) => {
 		await login(page);
 		await openNewEntry(page);
-		await expect(page.getByRole('heading', { name: '新增记账' })).toBeVisible();
+		await expect(page.getByRole('heading', { name: '新增记账', level: 2 })).toBeVisible();
 		await page.getByLabel('粗分类').selectOption('2');
 		await page.getByLabel('金额').fill('12.3456');
 		await page.getByLabel('备注（可选）').fill('browser expense');
@@ -234,7 +242,7 @@ test.describe('账目列表与详情', () => {
 		});
 		await page.route('**/entries/browser-entry-1', async (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ entry: first }) }));
 		await login(page);
-		await page.getByRole('link', { name: '账目' }).click();
+		await page.getByRole('link', { name: '账目', exact: true }).click();
 		await expect(page.getByText('第一页')).toBeVisible();
 		await page.getByRole('button', { name: '加载更多' }).click();
 		await expect(page.getByText('第二页')).toBeVisible();
@@ -258,7 +266,7 @@ test.describe('账目列表与详情', () => {
 		await page.getByLabel('备注（可选）').fill(note);
 		await page.getByRole('button', { name: '保存账目' }).click();
 		await expect(page).toHaveURL(/\/entries\/new$/);
-		await page.getByRole('link', { name: '账目' }).click();
+		await page.getByRole('link', { name: '账目', exact: true }).click();
 		await expect(page).toHaveURL(/\/entries$/);
 		const originalRow = page.locator('.entry-row').filter({ has: page.getByText(note, { exact: true }) });
 		await expect(originalRow).toContainText('支出');
@@ -291,7 +299,7 @@ test.describe('账目列表与详情', () => {
 		});
 		await page.on('dialog', async (dialog) => dialog.dismiss());
 		await login(page);
-		await page.getByRole('link', { name: '账目' }).click();
+		await page.getByRole('link', { name: '账目', exact: true }).click();
 		await expect(page.getByText('ordinary cancel')).toBeVisible();
 		await expect(page.getByText('legacy due')).toBeVisible();
 		await expect(page.getByRole('button', { name: '冲正这笔账目' })).toHaveCount(1);
@@ -310,7 +318,7 @@ test.describe('账目列表与详情', () => {
 		await page.getByLabel('备注（可选）').fill(note);
 		await page.getByRole('button', { name: '保存账目' }).click();
 		await expect(page).toHaveURL(/\/entries\/new$/);
-		await page.getByRole('link', { name: '账目' }).click();
+		await page.getByRole('link', { name: '账目', exact: true }).click();
 		await expect(page).toHaveURL(/\/entries$/);
 		await page.locator('.entry-row').filter({ has: page.getByText(note, { exact: true }) }).getByRole('link').click();
 		await expect(page.getByRole('button', { name: '冲正这笔账目' })).toBeVisible();
@@ -339,7 +347,7 @@ test.describe('账目列表与详情', () => {
 		await page.route('**/entries/browser-link-reversal', async (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ entry: reversal, relatedEntry: original }) }));
 
 		await login(page);
-		await page.getByRole('link', { name: '账目' }).click();
+		await page.getByRole('link', { name: '账目', exact: true }).click();
 		await page.locator('.entry-row').filter({ hasText: 'windowed original' }).getByRole('link').click();
 		await expect(page).toHaveURL(/\/entries\/browser-link-original$/);
 		await expect(page.getByRole('link', { name: /查看冲正记录/ })).toBeVisible();
@@ -366,7 +374,7 @@ test.describe('账目列表与详情', () => {
 		});
 		await page.on('dialog', async (dialog) => dialog.accept());
 		await login(page);
-		await page.getByRole('link', { name: '账目' }).click();
+		await page.getByRole('link', { name: '账目', exact: true }).click();
 		await expect(page.getByText('conflict entry')).toBeVisible();
 		await page.getByRole('link', { name: /支出/ }).click();
 		await expect(page.getByRole('button', { name: '冲正这笔账目' })).toBeVisible();
@@ -423,7 +431,7 @@ test.describe('发布边界与设置', () => {
 	});
 
 	test('分析、账目和设置路径都由同一 Worker 返回 SPA shell', async ({ page }) => {
-		for (const pathname of ['/analytics', '/entries', '/settings']) {
+		for (const pathname of ['/analytics', '/entries', '/entries/new', '/settings']) {
 			const response = await page.request.get(pathname, { headers: { Accept: 'text/html' } });
 			expect(response.status()).toBe(200);
 			expect(response.headers()['content-type']).toContain('text/html');

@@ -27,8 +27,8 @@ textarea:focus { border-color: #2d6956; box-shadow: 0 0 0 3px rgba(45, 105, 86, 
 .app-shell { min-height: 100vh; }
 .topbar { height: 72px; display: flex; align-items: center; gap: 30px; padding: 0 5vw; border-bottom: 1px solid #dfe5df; background: rgba(255, 253, 249, .86); }
 .brand { color: #1f5c49; font-weight: 800; letter-spacing: .06em; text-decoration: none; }
-nav { display: flex; gap: 22px; flex: 1; }
-nav a { padding: 25px 0 22px; color: #718079; text-decoration: none; font-size: 14px; border-bottom: 2px solid transparent; }
+nav { display: flex; gap: 22px; flex: 1; min-width: 0; overflow-x: auto; }
+nav a { flex: 0 0 auto; padding: 25px 0 22px; color: #718079; text-decoration: none; font-size: 14px; white-space: nowrap; border-bottom: 2px solid transparent; }
 nav a.active { color: #1f5c49; border-color: #1f5c49; }
 .ghost-button { border: 1px solid #cbd6ce; padding: 8px 14px; color: #53645c; background: transparent; }
 .content { width: min(1120px, 90vw); margin: 0 auto; padding: 58px 0; }

@@ -277,15 +277,17 @@ function LoginPage({ onLogin }: { onLogin: (session: Session) => void }) {
 
 function AppShell({ session, onLogout }: { session: Session; onLogout: () => void }) {
 	const path = window.location.pathname;
-	const isEntryDetail = /^\/entries\/[^/]+$/.test(path);
-	const title = path === '/analytics' ? '分析' : path === '/entries' ? '账目' : path === '/entries/new' ? '新增记账' : isEntryDetail ? '账目详情' : path === '/settings' ? '设置' : '分析';
+	const isNewEntry = path === '/entries/new';
+	const isEntryDetail = /^\/entries\/[^/]+$/.test(path) && !isNewEntry;
+	const title = path === '/analytics' ? '分析' : path === '/entries' ? '账目' : isNewEntry ? '新增记账' : isEntryDetail ? '账目详情' : path === '/settings' ? '设置' : '分析';
 	return (
 		<div className="app-shell">
 			<header className="topbar">
 				<a className="brand" href="/analytics" onClick={(event) => { event.preventDefault(); navigate('/analytics'); }}>LeDeGer</a>
 				<nav aria-label="主导航">
 					<a className={path === '/analytics' ? 'active' : ''} href="/analytics" onClick={(event) => { event.preventDefault(); navigate('/analytics'); }}>分析</a>
-					<a className={path.startsWith('/entries') ? 'active' : ''} href="/entries" onClick={(event) => { event.preventDefault(); navigate('/entries'); }}>账目</a>
+					<a className={path === '/entries' || isEntryDetail ? 'active' : ''} href="/entries" onClick={(event) => { event.preventDefault(); navigate('/entries'); }}>账目</a>
+					<a className={isNewEntry ? 'active' : ''} href="/entries/new" onClick={(event) => { event.preventDefault(); navigate('/entries/new'); }}>新增账目</a>
 					<a className={path === '/settings' ? 'active' : ''} href="/settings" onClick={(event) => { event.preventDefault(); navigate('/settings'); }}>设置</a>
 				</nav>
 				<button className="ghost-button" onClick={onLogout}>退出</button>
@@ -533,7 +535,7 @@ function NewEntryPage() {
 			})}</div>
 			<button type="button" className="secondary-button add-entry-button" onClick={() => setDrafts((current) => [...current, createEntryDraft()])} disabled={busy || drafts.length >= 50}>＋ 添加一笔</button>
 			{(error || message) && <p className={error ? 'error' : 'success'} role={error ? 'alert' : 'status'}>{error || message}</p>}
-			<div className="form-actions"><button type="button" className="secondary-button" onClick={() => navigate('/entries')}>取消</button><button type="submit" className="primary-button" disabled={busy}>{busy ? '保存中…' : drafts.length === 1 ? '保存账目' : `保存 ${drafts.length} 笔账目`}</button></div>
+			<div className="form-actions"><button type="submit" className="primary-button" disabled={busy}>{busy ? '保存中…' : drafts.length === 1 ? '保存账目' : `保存 ${drafts.length} 笔账目`}</button></div>
 		</form>
 	</section>;
 }
