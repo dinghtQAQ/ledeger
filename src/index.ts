@@ -4,6 +4,7 @@ import { OpenAPIHono, createRoute } from '@hono/zod-openapi';
 import { amountToUnits, displayAmount, normalizeAmount, unitsToAmount } from './money';
 import {
 	createEntrySchema,
+	shortcutCreateEntrySchema,
 	createEntryBatchSchema,
 	entryDetailResponseSchema,
 	entryPageSchema,
@@ -30,6 +31,7 @@ import { localDateToUtc } from './time';
 
 type LedgerEnv = Env & {
 	LEDGER_API_KEY?: string;
+	SHORTCUT_WRITE_TOKEN?: string;
 	LEDGER_PASSWORD?: string;
 	TURNSTILE_SECRET_KEY?: string;
 	TURNSTILE_SECRET?: string;
@@ -442,6 +444,30 @@ const createEntryRoute = createRoute({
 	},
 });
 
+const shortcutCreateEntryRoute = createRoute({
+	method: 'post',
+	path: '/shortcut/entries',
+	security: [{ shortcutBearerAuth: [] }],
+	parameters: [
+		{
+			name: 'Idempotency-Key',
+			in: 'header',
+			required: true,
+			schema: { type: 'string', minLength: 1 },
+		},
+	],
+	request: {
+		body: { required: true, content: { 'application/json': { schema: shortcutCreateEntrySchema } } },
+	},
+	responses: {
+		200: { description: 'Existing idempotent entry', content: { 'application/json': { schema: entryResponseSchema } } },
+		201: { description: 'Created', content: { 'application/json': { schema: entryResponseSchema } } },
+		400: errorResponse,
+		403: errorResponse,
+		409: errorResponse,
+	},
+});
+
 const createEntryBatchRoute = createRoute({
 	method: 'post',
 	path: '/entries/batch',
@@ -660,6 +686,12 @@ app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', {
 	bearerFormat: 'API key',
 });
 
+app.openAPIRegistry.registerComponent('securitySchemes', 'shortcutBearerAuth', {
+	type: 'http',
+	scheme: 'bearer',
+	bearerFormat: 'SHORTCUT_WRITE_TOKEN',
+});
+
 app.doc('/openapi.json', {
 	openapi: '3.0.3',
 	info: {
@@ -685,9 +717,17 @@ async function protectApi(c: LedgerContext, next: () => Promise<void>) {
 	c.res = renewSessionCookie(c, c.res, auth);
 }
 
+async function protectShortcutApi(c: LedgerContext, next: () => Promise<void>) {
+	if (!c.env.SHORTCUT_WRITE_TOKEN || c.req.header('Authorization') !== `Bearer ${c.env.SHORTCUT_WRITE_TOKEN}`) {
+		return jsonError(c, 403, 'forbidden') as never;
+	}
+	await next();
+}
+
 app.use('/categories', protectApi);
 app.use('/settings', protectApi);
 app.use('/analytics', protectApi);
+app.use('/shortcut/*', protectShortcutApi);
 
 app.use('/entries', async (c, next) => {
 	if (c.req.method === 'GET' && acceptsHtml(c) && isSpaRoute(new URL(c.req.url).pathname)) {
@@ -965,7 +1005,25 @@ registerOpenApi(createEntryBatchRoute, async (c: LedgerContext) => {
 	return c.json({ entries: rows.map((row) => toEntry(row as EntryRow)) }, 201);
 });
 
-registerOpenApi(createEntryRoute, async (c: LedgerContext) => {
+const shortcutCategoriesRoute = createRoute({
+	method: 'get',
+	path: '/shortcut/categories',
+	security: [{ shortcutBearerAuth: [] }],
+	responses: {
+		200: { description: 'Active categories for shortcut selection', content: { 'application/json': { schema: categoriesResponseSchema } } },
+		403: errorResponse,
+	},
+});
+
+registerOpenApi(shortcutCategoriesRoute, async (c: LedgerContext) => {
+	const coarse = await c.env.DB.prepare('SELECT id, name FROM coarse_categories ORDER BY id').all<{ id: number; name: string }>();
+	const fine = await c.env.DB.prepare('SELECT id, name, coarse_category_id, sort_order, is_active FROM fine_categories WHERE is_active = 1 ORDER BY coarse_category_id, sort_order, id').all<{
+		id: number; name: string; coarse_category_id: number; sort_order: number; is_active: number;
+	}>();
+	return c.json({ coarseCategories: coarse.results, fineCategories: fine.results.map(toFineCategory) }, 200);
+});
+
+async function handleCreateEntry(c: LedgerContext) {
 	const idempotencyKey = c.req.header('Idempotency-Key');
 	if (!idempotencyKey) return jsonError(c, 400, 'Idempotency-Key is required');
 	const input = validated<CreateEntryInput>(c, 'json');
@@ -994,7 +1052,10 @@ registerOpenApi(createEntryRoute, async (c: LedgerContext) => {
 	}
 	const row = await c.env.DB.prepare('SELECT * FROM entries WHERE id = ?').bind(id).first<EntryRow>();
 	return c.json({ entry: toEntry(row as EntryRow) }, 201);
-});
+}
+
+registerOpenApi(createEntryRoute, handleCreateEntry);
+registerOpenApi(shortcutCreateEntryRoute, handleCreateEntry);
 
 registerOpenApi(listEntriesRoute, async (c: LedgerContext) => {
 	const query = validated<ListEntriesQuery>(c, 'query');

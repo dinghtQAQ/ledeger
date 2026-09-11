@@ -61,6 +61,14 @@ pnpm run deploy           # 发布到 Cloudflare Workers
 Authorization: Bearer <LEDGER_API_KEY>
 ```
 
+快捷指令接口使用独立的 Worker Secret：
+
+```text
+Authorization: Bearer <SHORTCUT_WRITE_TOKEN>
+```
+
+首版仅开放 `GET /shortcut/categories` 和 `POST /shortcut/entries`。前者返回全部粗分类及启用的细分类，后者复用普通单笔记账的校验、幂等和响应契约，但不要求 `Origin`/`Referer`。普通业务接口仍使用 `LEDGER_API_KEY` 或网页会话，并保留同源校验。
+
 `/health`、`/health/db`、`/docs`、`/openapi.json` 公开访问；业务接口未配置或未提供正确密钥时返回 `403`。
 
 ## 发布流程
@@ -94,6 +102,7 @@ Workers Builds 建议配置：
 
 ```text
 LEDGER_API_KEY=replace-with-a-local-secret
+SHORTCUT_WRITE_TOKEN=replace-with-a-shortcut-secret
 LEDGER_TIMEZONE=Asia/Shanghai
 ```
 
@@ -102,6 +111,7 @@ LEDGER_TIMEZONE=Asia/Shanghai
 第二阶段生产发布检查：
 
 - 必需 Worker Secret：`LEDGER_PASSWORD`、`TURNSTILE_SECRET_KEY`；不要把密码或 Turnstile 私钥写入前端、`wrangler.jsonc` 或提交的变量文件。
+- 快捷指令还需要独立 Worker Secret `SHORTCUT_WRITE_TOKEN`。使用 `pnpm exec wrangler secret put SHORTCUT_WRITE_TOKEN --config wrangler.production.jsonc` 配置或轮换；替换后旧令牌立即失效，再把新值填入快捷指令配置。不要复用 `LEDGER_API_KEY`。
 - 构建时配置 Turnstile 公钥 `VITE_TURNSTILE_SITE_KEY`（可公开，需与生产域名匹配）；`TURNSTILE_VERIFY_URL` 仅用于本地测试 stub，生产使用 Cloudflare 默认校验地址。
 - 必需非敏感变量：`LEDGER_TIMEZONE`（例如 `Asia/Shanghai`）；它决定工资周期和日期筛选的本地日历边界。
 - 生产 D1 先执行 `pnpm exec wrangler d1 migrations apply ledeger-db --remote --config wrangler.production.jsonc`，再运行 `pnpm run check`、`pnpm run test:browser` 和 `VITE_TURNSTILE_SITE_KEY=<production-site-key> pnpm run deploy:dry-run -- --config wrangler.production.jsonc`。发布脚本会先构建 SPA，检查 `dist/index.html`、静态资源和 `ASSETS` 绑定，再执行 Wrangler dry-run；缺少生产公钥或误用测试 key 会明确失败。

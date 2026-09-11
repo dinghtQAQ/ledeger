@@ -20,6 +20,7 @@ const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
 const TEST_ENV = {
 	...env,
 	LEDGER_API_KEY: 'test-key',
+	SHORTCUT_WRITE_TOKEN: 'shortcut-test-token',
 	LEDGER_PASSWORD: 'test-password',
 	TURNSTILE_SECRET_KEY: 'test-turnstile-secret',
 	LEDGER_TIMEZONE: 'Asia/Shanghai',
@@ -247,6 +248,52 @@ describe('Hono worker', () => {
 		});
 		expect(cookieValidSource.status).toBe(201);
 		vi.restoreAllMocks();
+	});
+
+	it('protects shortcut routes with their dedicated token and skips browser source checks', async () => {
+		const missingToken = await request('/shortcut/categories');
+		expect(missingToken.status).toBe(403);
+		expect(await missingToken.json()).toEqual({ error: { message: 'forbidden' } });
+
+		const wrongToken = await request('/shortcut/categories', { headers: { Authorization: 'Bearer test-key' } });
+		expect(wrongToken.status).toBe(403);
+
+		const createdFine = await request('/categories/fine', {
+			method: 'POST',
+			headers: { Authorization: 'Bearer test-key', Origin: 'https://example.com', 'Content-Type': 'application/json' },
+			body: JSON.stringify({ name: '快捷细类', coarseCategoryId: 2 }),
+		});
+		expect(createdFine.status).toBe(201);
+		const fine = await createdFine.json<{ id: number }>();
+		const disabledFine = await request(`/categories/fine/${fine.id}/disable`, {
+			method: 'POST',
+			headers: { Authorization: 'Bearer test-key', Origin: 'https://example.com' },
+		});
+		expect(disabledFine.status).toBe(200);
+
+		const categories = await request('/shortcut/categories', { headers: { Authorization: 'Bearer shortcut-test-token' } });
+		expect(categories.status).toBe(200);
+		const categoryBody = await categories.json<{ coarseCategories: unknown[]; fineCategories: Array<{ id: number; isActive: boolean }> }>();
+		expect(categoryBody.coarseCategories).toHaveLength(7);
+		expect(categoryBody.fineCategories.find((item) => item.id === fine.id)).toBeUndefined();
+
+		const shortcutEntry = await request('/shortcut/entries', {
+			method: 'POST',
+			headers: {
+				Authorization: 'Bearer shortcut-test-token',
+				'Content-Type': 'application/json',
+				'Idempotency-Key': 'shortcut-entry-1',
+			},
+			body: JSON.stringify({ type: 'expense', amount: '12.34', occurredAt: '2026-09-11T01:02:03Z', categoryId: 2 }),
+		});
+		expect(shortcutEntry.status).toBe(201);
+
+		const ordinaryEntry = await request('/entries', {
+			method: 'POST',
+			headers: { Authorization: 'Bearer test-key', 'Content-Type': 'application/json', 'Idempotency-Key': 'ordinary-without-source' },
+			body: JSON.stringify({ type: 'expense', amount: '1', occurredAt: '2026-09-11T01:02:03Z', categoryId: 2 }),
+		});
+		expect(ordinaryEntry.status).toBe(403);
 	});
 	it('responds with Hello World! from the root route', async () => {
 		const request = new IncomingRequest('http://example.com');

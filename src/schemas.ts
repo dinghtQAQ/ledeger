@@ -34,6 +34,19 @@ export const createEntrySchema = z
 	})
 	.openapi('CreateEntry');
 
+export const shortcutCreateEntrySchema = z
+	.object({
+		type: z.enum(['income', 'expense']).openapi({ example: 'expense' }),
+		amount: amountSchema,
+		occurredAt: isoDateTimeSchema,
+		category: z.string().nullable().optional(),
+		categoryId: z.coerce.number().int().positive().nullable().optional(),
+		subcategoryId: z.coerce.number().int().positive().nullable().optional(),
+		note: z.string().nullable().optional(),
+	})
+	.strict()
+	.openapi('ShortcutCreateEntry');
+
 export const createEntryBatchSchema = z
 	.object({ entries: z.array(createEntrySchema).min(1).max(50) })
 	.openapi('CreateEntryBatch');
