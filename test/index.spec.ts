@@ -250,13 +250,19 @@ describe('Hono worker', () => {
 		vi.restoreAllMocks();
 	});
 
-	it('protects shortcut routes with their dedicated token and skips browser source checks', async () => {
+	it('creates shortcut entries with dedicated auth, validation, and idempotency semantics', async () => {
 		const missingToken = await request('/shortcut/categories');
 		expect(missingToken.status).toBe(403);
 		expect(await missingToken.json()).toEqual({ error: { message: 'forbidden' } });
 
 		const wrongToken = await request('/shortcut/categories', { headers: { Authorization: 'Bearer test-key' } });
 		expect(wrongToken.status).toBe(403);
+		const wrongEntryToken = await request('/shortcut/entries', {
+			method: 'POST',
+			headers: { Authorization: 'Bearer test-key', 'Content-Type': 'application/json', 'Idempotency-Key': 'wrong-token-entry' },
+			body: JSON.stringify({ type: 'income', amount: '1', occurredAt: '2026-09-11T01:02:03Z' }),
+		});
+		expect(wrongEntryToken.status).toBe(403);
 
 		const createdFine = await request('/categories/fine', {
 			method: 'POST',
@@ -265,28 +271,93 @@ describe('Hono worker', () => {
 		});
 		expect(createdFine.status).toBe(201);
 		const fine = await createdFine.json<{ id: number }>();
-		const disabledFine = await request(`/categories/fine/${fine.id}/disable`, {
-			method: 'POST',
-			headers: { Authorization: 'Bearer test-key', Origin: 'https://example.com' },
-		});
-		expect(disabledFine.status).toBe(200);
 
 		const categories = await request('/shortcut/categories', { headers: { Authorization: 'Bearer shortcut-test-token' } });
 		expect(categories.status).toBe(200);
 		const categoryBody = await categories.json<{ coarseCategories: unknown[]; fineCategories: Array<{ id: number; isActive: boolean }> }>();
 		expect(categoryBody.coarseCategories).toHaveLength(7);
-		expect(categoryBody.fineCategories.find((item) => item.id === fine.id)).toBeUndefined();
+		expect(categoryBody.fineCategories.find((item) => item.id === fine.id)).toMatchObject({ id: fine.id, isActive: true });
 
-		const shortcutEntry = await request('/shortcut/entries', {
+		const shortcutRequest = (body: Record<string, unknown>, key: string) =>
+			request('/shortcut/entries', {
+				method: 'POST',
+				headers: {
+					Authorization: 'Bearer shortcut-test-token',
+					'Content-Type': 'application/json',
+					'Idempotency-Key': key,
+				},
+				body: JSON.stringify(body),
+			});
+
+		const income = await shortcutRequest(
+			{ type: 'income', amount: '100.0016', occurredAt: '2026-09-11T01:02:03+08:00', note: '快捷收入' },
+			'income-entry',
+		);
+		expect(income.status).toBe(201);
+		expect(await income.json<any>()).toMatchObject({ entry: { type: 'income', amount: '100.0016', note: '快捷收入', categoryId: null, subcategoryId: null } });
+
+		const coarseExpense = await shortcutRequest(
+			{ type: 'expense', amount: '12.34', occurredAt: '2026-09-11T01:02:03Z', categoryId: 2 },
+			'coarse-expense',
+		);
+		expect(coarseExpense.status).toBe(201);
+		const coarseExpenseBody = await coarseExpense.json<any>();
+
+		const fineExpense = await shortcutRequest(
+			{ type: 'expense', amount: '9.87654', occurredAt: '2026-09-11T01:02:03Z', categoryId: 2, subcategoryId: fine.id },
+			'fine-expense',
+		);
+		expect(fineExpense.status).toBe(201);
+		expect(await fineExpense.json<any>()).toMatchObject({ entry: { categoryId: 2, subcategoryId: fine.id, amount: '9.8765' } });
+
+		const repeated = await shortcutRequest(
+			{ type: 'expense', amount: '12.3400', occurredAt: '2026-09-11T01:02:03Z', categoryId: 2 },
+			'coarse-expense',
+		);
+		expect(repeated.status).toBe(200);
+		expect((await repeated.json<any>()).entry.id).toBe(coarseExpenseBody.entry.id);
+
+		const conflict = await shortcutRequest(
+			{ type: 'expense', amount: '12.35', occurredAt: '2026-09-11T01:02:03Z', categoryId: 2 },
+			'coarse-expense',
+		);
+		expect(conflict.status).toBe(409);
+
+		const missingCoarse = await shortcutRequest({ type: 'expense', amount: '1', occurredAt: '2026-09-11T01:02:03Z' }, 'missing-coarse-shortcut');
+		expect(missingCoarse.status).toBe(400);
+		const wrongParent = await shortcutRequest(
+			{ type: 'expense', amount: '1', occurredAt: '2026-09-11T01:02:03Z', categoryId: 1, subcategoryId: fine.id },
+			'wrong-parent-shortcut',
+		);
+		expect(wrongParent.status).toBe(400);
+
+		const disabledFine = await request(`/categories/fine/${fine.id}/disable`, {
 			method: 'POST',
-			headers: {
-				Authorization: 'Bearer shortcut-test-token',
-				'Content-Type': 'application/json',
-				'Idempotency-Key': 'shortcut-entry-1',
-			},
-			body: JSON.stringify({ type: 'expense', amount: '12.34', occurredAt: '2026-09-11T01:02:03Z', categoryId: 2 }),
+			headers: { Authorization: 'Bearer test-key', Origin: 'https://example.com' },
 		});
-		expect(shortcutEntry.status).toBe(201);
+		expect(disabledFine.status).toBe(200);
+		const inactiveFine = await shortcutRequest(
+			{ type: 'expense', amount: '1', occurredAt: '2026-09-11T01:02:03Z', categoryId: 2, subcategoryId: fine.id },
+			'inactive-fine-shortcut',
+		);
+		expect(inactiveFine.status).toBe(400);
+		const missingKey = await request('/shortcut/entries', {
+			method: 'POST',
+			headers: { Authorization: 'Bearer shortcut-test-token', 'Content-Type': 'application/json' },
+			body: JSON.stringify({ type: 'income', amount: '1', occurredAt: '2026-09-11T01:02:03Z' }),
+		});
+		expect(missingKey.status).toBe(400);
+		expect(await missingKey.json()).toEqual({ error: { message: 'Idempotency-Key is required' } });
+
+		for (const [key, body] of [
+			['malformed-amount-shortcut', { type: 'income', amount: 'abc', occurredAt: '2026-09-11T01:02:03Z' }],
+			['unsupported-type-shortcut', { type: 'due_expense', amount: '1', occurredAt: '2026-09-11T01:02:03Z' }],
+			['due-at-shortcut', { type: 'income', amount: '1', occurredAt: '2026-09-11T01:02:03Z', dueAt: '2026-09-30T00:00:00Z' }],
+			['legacy-category-shortcut', { type: 'income', amount: '1', occurredAt: '2026-09-11T01:02:03Z', category: 'salary' }],
+		] as const) {
+			const invalid = await shortcutRequest(body, key);
+			expect(invalid.status).toBe(400);
+		}
 
 		const ordinaryEntry = await request('/entries', {
 			method: 'POST',
@@ -325,7 +396,10 @@ describe('Hono worker', () => {
 		expect(specBody.paths['/entries'].post).toBeTruthy();
 		expect(specBody.paths['/entries'].post.parameters[0].name).toBe('Idempotency-Key');
 		expect(specBody.paths['/entries/batch'].post).toBeTruthy();
+		expect(specBody.paths['/shortcut/entries'].post).toBeTruthy();
+		expect(specBody.paths['/shortcut/entries'].post.security).toEqual([{ shortcutBearerAuth: [] }]);
 		expect(specBody.components.securitySchemes.bearerAuth.scheme).toBe('bearer');
+		expect(specBody.components.securitySchemes.shortcutBearerAuth.bearerFormat).toBe('SHORTCUT_WRITE_TOKEN');
 		const docs = await request('/docs');
 		expect(docs.status).toBe(200);
 		expect(docs.headers.get('content-type')).toContain('text/html');

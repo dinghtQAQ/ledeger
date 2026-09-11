@@ -39,7 +39,6 @@ export const shortcutCreateEntrySchema = z
 		type: z.enum(['income', 'expense']).openapi({ example: 'expense' }),
 		amount: amountSchema,
 		occurredAt: isoDateTimeSchema,
-		category: z.string().nullable().optional(),
 		categoryId: z.coerce.number().int().positive().nullable().optional(),
 		subcategoryId: z.coerce.number().int().positive().nullable().optional(),
 		note: z.string().nullable().optional(),
